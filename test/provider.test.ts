@@ -52,6 +52,19 @@ test('multiple matching fragments in one entry coalesce into one hit', () => {
   provider.close()
 })
 
+test('CJK substring search matches words inside longer character runs', () => {
+  const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"你好，我喜欢凯尔希"}
+{"id":"B","parentId":"A","timestamp":"2026-01-01T00:00:02.000Z","type":"assistant","text":"凯尔希确实是位很有魅力的角色呢"}
+`
+  const provider = providerWith(text)
+  assert.deepEqual(provider.searchEvents({ query: '喜欢' }, { authRoot: '/tmp/ws' }).map((h) => h.entryId), ['A'])
+  assert.deepEqual(provider.searchEvents({ query: '我' }, { authRoot: '/tmp/ws' }).map((h) => h.entryId), ['A'])
+  assert.deepEqual(provider.searchEvents({ query: '凯尔希' }, { authRoot: '/tmp/ws' }).map((h) => h.entryId).sort(), ['A', 'B'])
+  assert.deepEqual(provider.searchEvents({ query: '角色' }, { authRoot: '/tmp/ws' }).map((h) => h.entryId), ['B'])
+  provider.close()
+})
+
 test('metadata filters apply to structured fields', () => {
   const provider = providerWith(TREE_SESSION, TOOL_SESSION)
   assert.deepEqual(

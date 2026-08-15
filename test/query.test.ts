@@ -28,3 +28,15 @@ test('raw FTS operators are treated as plain quoted terms', () => {
   assert.deepEqual(parsed.terms, ['foo', 'AND', 'bar'])
   assert.equal(parsed.ftsQuery, '"foo" "AND" "bar"')
 })
+
+test('CJK terms are segmented for the FTS query but kept whole for snippets', () => {
+  const parsed = parseQuery('喜欢')
+  assert.deepEqual(parsed.terms, ['喜欢'])
+  assert.equal(parsed.ftsQuery, '"喜 欢"')
+
+  const multi = parseQuery('我喜欢凯尔希')
+  assert.equal(multi.ftsQuery, '"我 喜 欢 凯 尔 希"')
+
+  const latin = parseQuery('event_search')
+  assert.equal(latin.ftsQuery, '"event_search"')
+})

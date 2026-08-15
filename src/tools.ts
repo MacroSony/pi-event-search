@@ -29,7 +29,7 @@ export const eventSearchToolDefinition: ToolDefinition = {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Plain terms and quoted phrases; separate terms use implicit AND.' },
-      sessionId: { type: 'string', description: 'Optional explicit session to search.' },
+      sessionId: { type: 'string', description: 'Optional explicit session to search. Use "current" to target the invoking session (still honors the invocation cutoff).' },
       cwd: { type: 'string', description: 'Optional workspace directory filter.' },
       kinds: { type: 'array', items: { type: 'string' } },
       entryTypes: { type: 'array', items: { type: 'string' } },
@@ -51,7 +51,7 @@ export const eventReadToolDefinition: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      sessionId: { type: 'string' },
+      sessionId: { type: 'string', description: 'Session id, or "current" for the invoking session.' },
       entryId: { type: 'string' },
       order: { type: 'string', enum: ['branch', 'append'] },
       before: { type: 'number', description: 'Neighbor count before the target.' },
@@ -70,7 +70,7 @@ export const eventTraceToolDefinition: ToolDefinition = {
   inputSchema: {
     type: 'object',
     properties: {
-      sessionId: { type: 'string' },
+      sessionId: { type: 'string', description: 'Session id, or "current" for the invoking session.' },
       entryId: { type: 'string' },
     },
     required: ['sessionId', 'entryId'],

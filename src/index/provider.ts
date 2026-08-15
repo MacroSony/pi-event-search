@@ -21,6 +21,7 @@ import { buildSessionTree, branchAncestors, branchDescendants, appendNeighbors }
 import { extractRelationships, extractSessionParentEdge, type RelationshipRecord } from '../relationships.ts'
 import { buildSnippet, makeTextPreview } from '../snippets.ts'
 import { parseQuery } from '../query.ts'
+import { segmentForIndex } from '../cjk.ts'
 import { isPathWithin, normalizePath } from '../auth/paths.ts'
 
 export interface ProviderOptions {
@@ -80,13 +81,14 @@ export class SearchProvider {
         entry_id TEXT NOT NULL,
         semantic_kind TEXT NOT NULL,
         text TEXT NOT NULL,
+        text_index TEXT NOT NULL,
         tool_name TEXT,
         is_error INTEGER NOT NULL DEFAULT 0,
         tool_call_id TEXT,
         custom_type TEXT
       );
       CREATE VIRTUAL TABLE fragments_fts USING fts5(
-        text,
+        text_index,
         content='fragments',
         content_rowid='rowid',
         tokenize="unicode61 tokenchars '_-.'"
@@ -204,8 +206,8 @@ export class SearchProvider {
 
   private insertFragments(tree: ReturnType<typeof buildSessionTree>): void {
     const insertFragment = this.db.prepare(`
-      INSERT INTO fragments(fragment_id, session_id, entry_id, semantic_kind, text, tool_name, is_error, tool_call_id, custom_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO fragments(fragment_id, session_id, entry_id, semantic_kind, text, text_index, tool_name, is_error, tool_call_id, custom_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     for (const entry of tree.entries) {
       for (const fragment of entry.fragments) {
@@ -215,6 +217,7 @@ export class SearchProvider {
           fragment.entryId,
           fragment.semanticKind,
           fragment.text,
+          segmentForIndex(fragment.text),
           fragment.toolName ?? null,
           fragment.isError === true ? 1 : 0,
           fragment.toolCallId ?? null,

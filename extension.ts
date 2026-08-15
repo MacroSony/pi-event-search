@@ -103,7 +103,7 @@ export default function (pi: ExtensionAPI) {
       'Read-only search over persisted Pi session events as typed semantic fragments. Returns bounded event hits with (sessionId, entryId) provenance.',
     parameters: Type.Object({
       query: Type.String({ minLength: 1, description: 'Plain terms and quoted phrases; separate terms use implicit AND.' }),
-      sessionId: Type.Optional(Type.String({ description: 'Optional explicit session to search.' })),
+      sessionId: Type.Optional(Type.String({ description: 'Optional explicit session to search. Use "current" to target the invoking session (still honors the invocation cutoff).' })),
       cwd: Type.Optional(Type.String({ description: 'Optional workspace directory filter.' })),
       kinds: Type.Optional(Type.Array(Type.String())),
       entryTypes: Type.Optional(Type.Array(Type.String())),
@@ -139,7 +139,7 @@ export default function (pi: ExtensionAPI) {
     description:
       'Read-only lookup of one authorized source event by (sessionId, entryId) with bounded text windows and exact truncation receipts.',
     parameters: Type.Object({
-      sessionId: Type.String(),
+      sessionId: Type.String({ description: 'Session id, or "current" for the invoking session.' }),
       entryId: Type.String(),
       order: Type.Optional(Type.Union([Type.Literal('branch'), Type.Literal('append')])),
       before: Type.Optional(Type.Number({ minimum: 0, maximum: 20 })),
@@ -175,7 +175,7 @@ export default function (pi: ExtensionAPI) {
     description:
       'Read-only trace of the bounded local relationship graph for one event: parent, children, derived branch siblings, and related edges.',
     parameters: Type.Object({
-      sessionId: Type.String(),
+      sessionId: Type.String({ description: 'Session id, or "current" for the invoking session.' }),
       entryId: Type.String(),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

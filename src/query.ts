@@ -1,4 +1,5 @@
 import { InvalidQueryError } from './errors.ts'
+import { segmentForIndex } from './cjk.ts'
 
 export interface ParsedQuery {
   terms: string[]
@@ -65,9 +66,12 @@ export function parseQuery(input: string): ParsedQuery {
     throw new InvalidQueryError('Query must contain at least one term or quoted phrase.')
   }
 
+  // CJK terms are segmented into per-character tokens so that substring
+  // queries match inside longer CJK runs. `terms`/`phrases` stay whole for
+  // snippet highlighting against the original fragment text.
   const ftsParts: string[] = []
-  for (const term of terms) ftsParts.push(quoteFtsString(term))
-  for (const phrase of phrases) ftsParts.push(quoteFtsString(phrase))
+  for (const term of terms) ftsParts.push(quoteFtsString(segmentForIndex(term)))
+  for (const phrase of phrases) ftsParts.push(quoteFtsString(segmentForIndex(phrase)))
   return { terms, phrases, ftsQuery: ftsParts.join(' ') }
 }
 

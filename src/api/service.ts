@@ -1,4 +1,5 @@
 import { Authorizer } from '../auth/authorizer.ts'
+import { PiEventSearchError } from '../errors.ts'
 import type {
   EventSearchHit,
   EventSearchRequest,
@@ -31,6 +32,13 @@ const DEFAULT_MAX_READ_BEFORE = 5
 const DEFAULT_MAX_READ_AFTER = 5
 const DEFAULT_MAX_WINDOW_CHARS = 4000
 
+/**
+ * Special `sessionId` value that resolves to the caller's current session.
+ * Targeting the current session still honors the invocation cutoff: entries
+ * at or after the invoking tool call are never returned.
+ */
+export const CURRENT_SESSION_ID = 'current'
+
 export class PiEventSearchService {
   readonly provider: SearchProvider
   readonly searchLimit: number
@@ -48,7 +56,11 @@ export class PiEventSearchService {
 
   searchEvents(request: EventSearchRequest, invocation: ServiceInvocation): EventSearchHit[] {
     const context = this.toSearchContext(invocation)
-    return this.provider.searchEvents(request, context, this.searchLimit)
+    const resolvedRequest =
+      request.sessionId !== undefined
+        ? { ...request, sessionId: this.resolveSessionId(request.sessionId, invocation) }
+        : request
+    return this.provider.searchEvents(resolvedRequest, context, this.searchLimit)
   }
 
   readEvent(
@@ -58,23 +70,24 @@ export class PiEventSearchService {
     invocation: ServiceInvocation,
   ): ReadEventResult {
     const root = this.resolveRoot(invocation)
+    const resolvedSessionId = this.resolveSessionId(sessionId, invocation)
     const boundedOptions: ReadEventOptions = {
       ...options,
       before: Math.min(options.before ?? 1, this.maxReadBefore),
       after: Math.min(options.after ?? 1, this.maxReadAfter),
       windowChars: Math.min(options.windowChars ?? 2000, this.maxWindowChars),
     }
-    return this.provider.readEvent(sessionId, entryId, boundedOptions, root)
+    return this.provider.readEvent(resolvedSessionId, entryId, boundedOptions, root)
   }
 
   traceEvent(sessionId: string, entryId: string, invocation: ServiceInvocation): EventTrace {
     const root = this.resolveRoot(invocation)
-    return this.provider.traceEvent(sessionId, entryId, root)
+    return this.provider.traceEvent(this.resolveSessionId(sessionId, invocation), entryId, root)
   }
 
   traceSession(sessionId: string, invocation: ServiceInvocation): SessionLineage {
     const root = this.resolveRoot(invocation)
-    return this.provider.traceSession(sessionId, root)
+    return this.provider.traceSession(this.resolveSessionId(sessionId, invocation), root)
   }
 
   private resolveRoot(invocation: ServiceInvocation): string {
@@ -83,6 +96,18 @@ export class PiEventSearchService {
       explicitWorkspaceRoot: invocation.explicitWorkspaceRoot,
     })
     return authorizer.root
+  }
+
+  /** Map the public "current" alias to the invoking session id. */
+  private resolveSessionId(sessionId: string, invocation: ServiceInvocation): string {
+    if (sessionId !== CURRENT_SESSION_ID) return sessionId
+    if (invocation.currentSessionId === undefined) {
+      throw new PiEventSearchError(
+        'INVALID_ARGUMENT',
+        'The "current" session is not available in this invocation context.',
+      )
+    }
+    return invocation.currentSessionId
   }
 
   private toSearchContext(invocation: ServiceInvocation): { authRoot: string; execution?: ExecutionContext } {
