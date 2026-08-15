@@ -61,8 +61,9 @@ export function buildSessionTree(sessionId: string, entries: EntryRecord[]): Ses
     selectedPath.push(...reversePath.reverse())
   }
 
+  const allIds = new Set(entries.map((entry) => entry.id))
   for (const entry of entries) {
-    entry.branchState = classifyBranchState(entry, selectedSet, materializedLeafId)
+    entry.branchState = classifyBranchState(entry, selectedSet, materializedLeafId, allIds)
     entry.selectionState = classifySelectionState(entry, selectedSet, entries)
   }
 
@@ -73,11 +74,13 @@ function classifyBranchState(
   entry: EntryRecord,
   selectedSet: Set<string>,
   materializedLeafId: string | null,
+  allIds: Set<string>,
 ): BranchState {
   if (materializedLeafId === null) return 'unknown'
   if (selectedSet.has(entry.id)) return 'selected'
-  if (entry.parentId === null && !selectedSet.has(entry.id)) return 'alternate'
-  // Entries with a missing/unknown parent chain cannot be classified reliably.
+  // An entry whose parent is missing cannot be placed relative to the
+  // materialized branch; report unknown rather than guessing alternate.
+  if (entry.parentId !== null && !allIds.has(entry.parentId)) return 'unknown'
   return 'alternate'
 }
 

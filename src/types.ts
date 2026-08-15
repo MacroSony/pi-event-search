@@ -258,6 +258,12 @@ export interface EventTrace {
   truncated: boolean
 }
 
+export interface SessionLineage {
+  sessionId: string
+  parentSessionId?: string
+  childSessionIds: string[]
+}
+
 // ---------------------------------------------------------------------------
 // Authorization context
 // ---------------------------------------------------------------------------

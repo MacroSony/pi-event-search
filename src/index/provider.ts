@@ -12,6 +12,7 @@ import type {
   ReadEventOptions,
   ReadEventResult,
   SessionHeader,
+  SessionLineage,
   SessionSourceInfo,
   TraceEdge,
   TraceNode,
@@ -96,8 +97,84 @@ export class SearchProvider {
   // -------------------------------------------------------------------------
 
   indexSession(parsed: ParsedSession, sourceInfo: SessionSourceInfo): void {
+    const { header } = parsed
+    const entryRecords = this.buildEntryRecords(parsed)
+    const tree = buildSessionTree(header.sessionId, entryRecords)
+    const relationships = extractRelationships(header.sessionId, tree)
+    const sessionParentEdge = extractSessionParentEdge(header.sessionId, header)
+    const sessionName = this.computeSessionName(tree)
+
+    // Replace any existing session transactionally.
+    this.db.exec('BEGIN')
+    try {
+      this.deleteSessionRows(header.sessionId)
+      this.insertFragments(tree)
+      this.db.exec(`INSERT INTO fragments_fts(fragments_fts) VALUES('rebuild')`)
+      this.db.exec('COMMIT')
+    } catch (err) {
+      this.db.exec('ROLLBACK')
+      throw err
+    }
+    this.sessions.set(header.sessionId, {
+      header,
+      sourceInfo,
+      tree,
+      relationships,
+      sessionParentEdge,
+      sessionName,
+    })
+  }
+
+  /**
+   * Append only the durable suffix of an append-only session. The full file is
+   * parsed for validation and tree recomputation, but only new fragments are
+   * inserted into the disposable FTS index.
+   */
+  appendSession(parsed: ParsedSession, sourceInfo: SessionSourceInfo, previousEntryCount: number): void {
+    const { header } = parsed
+    const entryRecords = this.buildEntryRecords(parsed)
+    const tree = buildSessionTree(header.sessionId, entryRecords)
+    const relationships = extractRelationships(header.sessionId, tree)
+    const sessionParentEdge = extractSessionParentEdge(header.sessionId, header)
+    const sessionName = this.computeSessionName(tree)
+    const newEntries = tree.entries.filter((entry) => entry.appendSeq >= previousEntryCount)
+
+    this.db.exec('BEGIN')
+    try {
+      this.insertFragments({ ...tree, entries: newEntries } as ReturnType<typeof buildSessionTree>)
+      this.db.exec(`INSERT INTO fragments_fts(fragments_fts) VALUES('rebuild')`)
+      this.db.exec('COMMIT')
+    } catch (err) {
+      this.db.exec('ROLLBACK')
+      throw err
+    }
+    this.sessions.set(header.sessionId, {
+      header,
+      sourceInfo,
+      tree,
+      relationships,
+      sessionParentEdge,
+      sessionName,
+    })
+  }
+
+  removeSession(sessionId: string): void {
+    if (!this.sessions.has(sessionId)) return
+    this.db.exec('BEGIN')
+    try {
+      this.deleteSessionRows(sessionId)
+      this.db.exec(`INSERT INTO fragments_fts(fragments_fts) VALUES('rebuild')`)
+      this.db.exec('COMMIT')
+    } catch (err) {
+      this.db.exec('ROLLBACK')
+      throw err
+    }
+    this.sessions.delete(sessionId)
+  }
+
+  private buildEntryRecords(parsed: ParsedSession): Array<import('../types.ts').EntryRecord> {
     const { header, entries } = parsed
-    const entryRecords = entries.map((entry, index) => {
+    return entries.map((entry, index) => {
       const projection = this.projector.project(header.sessionId, entry)
       return {
         ...entry,
@@ -110,14 +187,9 @@ export class SearchProvider {
         fragments: projection.fragments,
       } as import('../types.ts').EntryRecord
     })
+  }
 
-    const tree = buildSessionTree(header.sessionId, entryRecords)
-    const relationships = extractRelationships(header.sessionId, tree)
-    const sessionParentEdge = extractSessionParentEdge(header.sessionId, header)
-    const sessionName = this.computeSessionName(tree)
-
-    // Replace any existing session transactionally (in-memory).
-    this.removeSession(header.sessionId)
+  private insertFragments(tree: ReturnType<typeof buildSessionTree>): void {
     const insertFragment = this.db.prepare(`
       INSERT INTO fragments(fragment_id, session_id, entry_id, semantic_kind, text, tool_name, is_error, tool_call_id, custom_type)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -138,21 +210,6 @@ export class SearchProvider {
         this.fragmentsByRowid.set(Number(result.lastInsertRowid), fragment)
       }
     }
-    this.db.exec(`INSERT INTO fragments_fts(fragments_fts) VALUES('rebuild')`)
-    this.sessions.set(header.sessionId, {
-      header,
-      sourceInfo,
-      tree,
-      relationships,
-      sessionParentEdge,
-      sessionName,
-    })
-  }
-
-  removeSession(sessionId: string): void {
-    if (!this.sessions.has(sessionId)) return
-    this.deleteSessionRows(sessionId)
-    this.sessions.delete(sessionId)
   }
 
   private deleteSessionRows(sessionId: string): void {
@@ -162,7 +219,6 @@ export class SearchProvider {
       deleteFragment.run(row.rowid)
       this.fragmentsByRowid.delete(row.rowid)
     }
-    this.db.exec(`INSERT INTO fragments_fts(fragments_fts) VALUES('rebuild')`)
   }
 
   hasSession(sessionId: string): boolean {
@@ -453,6 +509,29 @@ export class SearchProvider {
       branchSiblings,
       related: allRelated,
       truncated: related.length > this.traceMaxRelated,
+    }
+  }
+
+  /**
+   * Return the authorized parent/child session lineage without loading
+   * complete transcripts. Internal until a concrete model workflow requires
+   * a fourth public tool.
+   */
+  traceSession(sessionId: string, authRoot: string): SessionLineage {
+    const session = this.requireAuthorizedSession(sessionId, authRoot)
+    const childSessionIds: string[] = []
+    for (const candidate of this.sessions.values()) {
+      if (candidate.header.parentSession === sessionId) {
+        if (this.isSessionAuthorized(candidate, normalizePath(authRoot))) {
+          childSessionIds.push(candidate.header.sessionId)
+        }
+      }
+    }
+    childSessionIds.sort()
+    return {
+      sessionId,
+      parentSessionId: session.header.parentSession ?? undefined,
+      childSessionIds,
     }
   }
 
