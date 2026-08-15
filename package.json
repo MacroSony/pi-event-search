@@ -1,0 +1,14 @@
+{
+  "name": "pi-event-search",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Event-oriented cross-session history retrieval for the Pi coding agent",
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "test:single": "node --test --experimental-strip-types"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
