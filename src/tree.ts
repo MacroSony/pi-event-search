@@ -92,12 +92,22 @@ function classifySelectionState(
   if (!selectedSet.has(entry.id)) return 'not-selected'
   if (entry.contextRole === 'metadata' || entry.contextRole === 'control') return 'not-applicable'
   if (entry.contextRole === 'summary') return 'direct'
-  // Conversation entry on the selected path. Summarized if a later compaction
-  // on the selected path exists before the materialized leaf.
+  // Conversation entry on the selected path. Summarized when a later selected
+  // compaction supersedes it. Pi compactions record firstKeptEntryId: entries
+  // before that point are summarized, entries from that point onward are
+  // retained directly. Legacy compactions without firstKeptEntryId summarize
+  // every earlier selected conversation entry.
+  const byId = new Map(entries.map((item) => [item.id, item]))
   for (const other of entries) {
     if (other.appendSeq <= entry.appendSeq) continue
     if (!selectedSet.has(other.id)) continue
-    if (other.entryType === 'compaction') return 'summarized'
+    if (other.entryType !== 'compaction') continue
+    const firstKeptId = typeof other['firstKeptEntryId'] === 'string' ? other['firstKeptEntryId'] : null
+    if (firstKeptId === null) return 'summarized'
+    const firstKept = byId.get(firstKeptId)
+    if (firstKept === undefined) return 'summarized'
+    if (entry.appendSeq < firstKept.appendSeq) return 'summarized'
+    // Retained by this compaction; a later compaction may still supersede it.
   }
   return 'direct'
 }
