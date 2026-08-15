@@ -59,6 +59,16 @@ export function parseLines(text: string, filePath = '<memory>'): ParsedLines {
   if (!sawHeader || header === null) {
     throw new SourceParseError(`${filePath}: session header is missing`)
   }
+
+  const seenIds = new Set<string>()
+  for (let i = 0; i < entries.length; i += 1) {
+    const entryId = entries[i].id
+    if (seenIds.has(entryId)) {
+      throw new SourceParseError(`${filePath}:${entryLineNumbers[i]}: duplicate entry id '${entryId}'`, entryLineNumbers[i])
+    }
+    seenIds.add(entryId)
+  }
+
   return { header, entries, entryLineNumbers, entryHashes }
 }
 
@@ -67,25 +77,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseHeader(value: Record<string, unknown>, filePath: string, line: number): SessionHeader {
-  const sessionId = value['sessionId']
-  const createdAt = value['createdAt']
-  const cwd = value['cwd']
-  const parentSession = value['parentSession']
-  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+  // Accept both the project fixture vocabulary (sessionId/createdAt) and
+  // Pi's persisted session header vocabulary (id/timestamp).
+  const sessionId = stringValue(value['sessionId']) ?? stringValue(value['id'])
+  const createdAt = stringValue(value['createdAt']) ?? stringValue(value['timestamp'])
+  const cwd = stringValue(value['cwd'])
+  const parentSession = stringValue(value['parentSession'])
+  if (sessionId === null) {
     throw new SourceParseError(`${filePath}:${line}: header.sessionId must be a non-empty string`, line)
   }
-  if (typeof createdAt !== 'string') {
+  if (createdAt === null) {
     throw new SourceParseError(`${filePath}:${line}: header.createdAt must be a string`, line)
   }
-  if (typeof cwd !== 'string' || cwd.length === 0) {
+  if (cwd === null) {
     throw new SourceParseError(`${filePath}:${line}: header.cwd must be a non-empty string`, line)
   }
   return {
     sessionId,
     createdAt,
     cwd,
-    parentSession: typeof parentSession === 'string' ? parentSession : undefined,
+    parentSession: parentSession ?? undefined,
   }
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
 }
 
 function parseEntry(value: Record<string, unknown>, filePath: string, line: number): RawEntry {
@@ -105,7 +121,7 @@ function parseEntry(value: Record<string, unknown>, filePath: string, line: numb
   if (rawParent !== undefined && rawParent !== null && typeof rawParent !== 'string') {
     throw new SourceParseError(`${filePath}:${line}: entry.parentId must be a string or null`, line)
   }
-  const entry: RawEntry = { ...value, id, timestamp, type, parentId: rawParent as string | null }
+  const entry: RawEntry = { ...value, id, timestamp, type, parentId: (rawParent as string | null) ?? null }
   return entry
 }
 

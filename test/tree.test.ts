@@ -66,6 +66,11 @@ test('branch descendants follow the selected path', () => {
   assert.deepEqual(branchDescendants('B', tree, 10).entries.map((entry) => entry.id), ['E', 'F'])
 })
 
+test('append neighbors honor zero counts', () => {
+  const { tree } = buildTree(TREE_SESSION)
+  assert.deepEqual(appendNeighbors('E', tree, 0, 0), { before: [], after: [] })
+})
+
 test('append neighbors use JSONL chronology regardless of branch', () => {
   const { tree } = buildTree(TREE_SESSION)
   const { before, after } = appendNeighbors('E', tree, 2, 2)

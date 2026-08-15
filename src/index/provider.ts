@@ -27,6 +27,7 @@ export interface ProviderOptions {
   searchLimit?: number
   readPreviewChars?: number
   traceMaxRelated?: number
+  traceMaxChildren?: number
   projector?: Projector
 }
 
@@ -50,6 +51,7 @@ export class SearchProvider {
   private readonly searchLimit: number
   private readonly readPreviewChars: number
   private readonly traceMaxRelated: number
+  private readonly traceMaxChildren: number
   private db: DatabaseSync
   private readonly sessions = new Map<string, SessionRecord>()
   private readonly fragmentsByRowid = new Map<number, Fragment>()
@@ -60,6 +62,7 @@ export class SearchProvider {
     this.searchLimit = options.searchLimit ?? 20
     this.readPreviewChars = options.readPreviewChars ?? 2000
     this.traceMaxRelated = options.traceMaxRelated ?? 20
+    this.traceMaxChildren = options.traceMaxChildren ?? 50
     this.db = this.createDatabase()
   }
 
@@ -113,6 +116,7 @@ export class SearchProvider {
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
+      this.rebuildFragmentRowidMap()
       throw err
     }
     this.sessions.set(header.sessionId, {
@@ -123,6 +127,7 @@ export class SearchProvider {
       sessionParentEdge,
       sessionName,
     })
+    this.rebuildFragmentRowidMap()
   }
 
   /**
@@ -146,6 +151,7 @@ export class SearchProvider {
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
+      this.rebuildFragmentRowidMap()
       throw err
     }
     this.sessions.set(header.sessionId, {
@@ -156,6 +162,7 @@ export class SearchProvider {
       sessionParentEdge,
       sessionName,
     })
+    this.rebuildFragmentRowidMap()
   }
 
   removeSession(sessionId: string): void {
@@ -167,9 +174,11 @@ export class SearchProvider {
       this.db.exec('COMMIT')
     } catch (err) {
       this.db.exec('ROLLBACK')
+      this.rebuildFragmentRowidMap()
       throw err
     }
     this.sessions.delete(sessionId)
+    this.rebuildFragmentRowidMap()
   }
 
   private buildEntryRecords(parsed: ParsedSession): Array<import('../types.ts').EntryRecord> {
@@ -196,7 +205,7 @@ export class SearchProvider {
     `)
     for (const entry of tree.entries) {
       for (const fragment of entry.fragments) {
-        const result = insertFragment.run(
+        insertFragment.run(
           fragment.fragmentId,
           fragment.sessionId,
           fragment.entryId,
@@ -207,7 +216,6 @@ export class SearchProvider {
           fragment.toolCallId ?? null,
           fragment.customType ?? null,
         )
-        this.fragmentsByRowid.set(Number(result.lastInsertRowid), fragment)
       }
     }
   }
@@ -217,7 +225,31 @@ export class SearchProvider {
     const deleteFragment = this.db.prepare(`DELETE FROM fragments WHERE rowid = ?`)
     for (const row of rows) {
       deleteFragment.run(row.rowid)
-      this.fragmentsByRowid.delete(row.rowid)
+    }
+  }
+
+  /** Rebuild the rowid->fragment map from the database after any mutation. */
+  private rebuildFragmentRowidMap(): void {
+    this.fragmentsByRowid.clear()
+    const rows = this.db.prepare(`SELECT rowid, session_id, fragment_id FROM fragments`).all() as Array<{
+      rowid: number
+      session_id: string
+      fragment_id: string
+    }>
+    for (const row of rows) {
+      const session = this.sessions.get(row.session_id)
+      if (!session) continue
+      let found: Fragment | undefined
+      for (const entry of session.tree.entries) {
+        for (const fragment of entry.fragments) {
+          if (fragment.fragmentId === row.fragment_id) {
+            found = fragment
+            break
+          }
+        }
+        if (found) break
+      }
+      if (found) this.fragmentsByRowid.set(row.rowid, found)
     }
   }
 
@@ -258,7 +290,7 @@ export class SearchProvider {
       }
     }
 
-    const matchRows = this.runFtsMatch(parsed.ftsQuery, maxHits * 20)
+    const matchRows = this.runFtsMatch(parsed.ftsQuery, Math.max(maxHits * 50, 500))
     const grouped = new Map<string, { fragment: Fragment; count: number; rank: number }>()
 
     for (const row of matchRows) {
@@ -327,6 +359,7 @@ export class SearchProvider {
     if (request.sessionId !== undefined && fragment.sessionId !== request.sessionId) return false
     if (request.cwd !== undefined && !isPathWithin(session.header.cwd, normalizePath(request.cwd))) return false
     if (request.kinds !== undefined && request.kinds.length > 0 && !request.kinds.includes(fragment.semanticKind)) return false
+    if (request.entryTypes !== undefined && request.entryTypes.length > 0 && !request.entryTypes.includes(entry.entryType)) return false
     if (request.roles !== undefined && request.roles.length > 0 && !request.roles.includes(entry.role)) return false
     if (request.toolNames !== undefined && request.toolNames.length > 0 && !(fragment.toolName !== undefined && request.toolNames.includes(fragment.toolName))) return false
     if (request.errorOnly === true && fragment.isError !== true) return false
@@ -486,10 +519,10 @@ export class SearchProvider {
     }
 
     const parent = entry.parentId !== null ? this.recordedEdge(session, entry, entry.parentId, 'parent') : undefined
-    const children: TraceEdge[] = (tree.childrenByParent.get(entryId) ?? []).map((childId) =>
+    const allChildren = (tree.childrenByParent.get(entryId) ?? []).map((childId) =>
       this.recordedEdge(session, entry, childId, 'child'),
     )
-    const branchSiblings: TraceEdge[] = entry.parentId !== null
+    const allBranchSiblings = entry.parentId !== null
       ? (tree.childrenByParent.get(entry.parentId) ?? [])
           .filter((childId) => childId !== entryId)
           .map((childId) => this.derivedEdge(session, entry, childId, 'branch-sibling'))
@@ -501,6 +534,8 @@ export class SearchProvider {
       related.push(recordToTraceEdge(session, record))
     }
 
+    const children = allChildren.slice(0, this.traceMaxChildren)
+    const branchSiblings = allBranchSiblings.slice(0, this.traceMaxChildren)
     const allRelated = related.slice(0, this.traceMaxRelated)
     return {
       target,
@@ -508,7 +543,10 @@ export class SearchProvider {
       children,
       branchSiblings,
       related: allRelated,
-      truncated: related.length > this.traceMaxRelated,
+      truncated:
+        allChildren.length > this.traceMaxChildren ||
+        allBranchSiblings.length > this.traceMaxChildren ||
+        related.length > this.traceMaxRelated,
     }
   }
 
@@ -521,7 +559,11 @@ export class SearchProvider {
     const session = this.requireAuthorizedSession(sessionId, authRoot)
     const childSessionIds: string[] = []
     for (const candidate of this.sessions.values()) {
-      if (candidate.header.parentSession === sessionId) {
+      const parentRef = candidate.header.parentSession
+      const matches =
+        parentRef === sessionId ||
+        (parentRef !== undefined && parentRef === session.sourceInfo.filePath)
+      if (matches) {
         if (this.isSessionAuthorized(candidate, normalizePath(authRoot))) {
           childSessionIds.push(candidate.header.sessionId)
         }

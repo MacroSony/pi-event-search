@@ -30,11 +30,12 @@ export function buildSnippet(text: string, terms: string[], options: SnippetOpti
   if (matchIndex < 0) {
     return codePointSlice(normalized, 0, maxChars)
   }
+  const matchCodePointIndex = Array.from(normalized.slice(0, matchIndex)).length
 
   const contextBefore = Math.floor(maxChars / 3)
   const contextAfter = maxChars - contextBefore
-  const start = Math.max(0, matchIndex - contextBefore)
-  const end = Math.min(codePointLength(normalized), matchIndex + contextAfter)
+  const start = Math.max(0, matchCodePointIndex - contextBefore)
+  const end = Math.min(codePointLength(normalized), matchCodePointIndex + contextAfter)
   return codePointSlice(normalized, start, end)
 }
 

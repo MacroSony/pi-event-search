@@ -129,6 +129,7 @@ export interface EventSearchRequest {
   sessionId?: string
   cwd?: string
   kinds?: string[]
+  entryTypes?: string[]
   roles?: string[]
   toolNames?: string[]
   errorOnly?: boolean

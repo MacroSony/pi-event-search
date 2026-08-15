@@ -4,9 +4,9 @@ Event-oriented cross-session history retrieval for the Pi coding agent.
 
 `pi-event-search` treats Pi's persisted session entries as durable evidence. It builds a disposable local index of searchable event fragments, returns hits anchored to exact session entries, and lets callers inspect the surrounding branch and relationships when a snippet is not enough.
 
-The project is currently in the design phase. The MVP public tools are
-`event_search`, `event_read`, and `event_trace`; runtime dependencies and exact
-storage details are not committed yet.
+The MVP public tools are `event_search`, `event_read`, and `event_trace`.
+The core search/read/trace engine is implemented and tested; the extension
+entrypoint in `extension.ts` registers those tools with the Pi coding agent.
 
 ## Why this exists
 
@@ -39,6 +39,25 @@ A search result should retain what produced it: the session, entry, fragment kin
 
 - [Core concepts](docs/concepts.md)
 - [Tool design](docs/tool-design.md)
+
+## Implementation status
+
+- `src/parser.ts` — JSONL parser for fixture and Pi persisted session formats.
+- `src/projector.ts` — typed semantic projection; private thinking excluded.
+- `src/tree.ts` — append/branch order, materialized leaf, fork rules.
+- `src/relationships.ts` — recorded/inferred relationship extraction.
+- `src/index/provider.ts` — in-memory SQLite FTS5 search/read/trace provider.
+- `src/index/maintainer.ts` — incremental append/rebuild/removal lifecycle.
+- `src/auth/*` — session discovery and workspace-root authorization.
+- `src/api/service.ts`, `src/tools.ts` — bounded public tool layer.
+- `src/pi-adapter.ts` — indexes the current session from Pi's SessionManager.
+- `extension.ts` — Pi extension entrypoint (`pi -e ./extension.ts`).
+
+Run the test suite:
+
+```bash
+node --test --experimental-strip-types test/*.test.ts
+```
 
 ## Initial boundary
 

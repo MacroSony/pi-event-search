@@ -40,8 +40,12 @@ const ENTRY_CUSTOM = 'custom'
 const ENTRY_SESSION_INFO = 'session_info'
 const ENTRY_MODEL_CHANGE = 'model_change'
 const ENTRY_THINKING_CHANGE = 'thinking_change'
+const ENTRY_THINKING_LEVEL_CHANGE = 'thinking_level_change'
 const ENTRY_LABEL = 'label'
 const ENTRY_EXTENSION_STATE = 'extension_state'
+const ENTRY_MESSAGE = 'message'
+const ENTRY_BASH_EXECUTION = 'bashExecution'
+const ENTRY_CUSTOM_MESSAGE = 'custom_message'
 
 export const SEMANTIC_KINDS = {
   USER_TEXT: 'user.text',
@@ -68,8 +72,12 @@ export const ENTRY_TYPES = {
   SESSION_INFO: ENTRY_SESSION_INFO,
   MODEL_CHANGE: ENTRY_MODEL_CHANGE,
   THINKING_CHANGE: ENTRY_THINKING_CHANGE,
+  THINKING_LEVEL_CHANGE: ENTRY_THINKING_LEVEL_CHANGE,
   LABEL: ENTRY_LABEL,
   EXTENSION_STATE: ENTRY_EXTENSION_STATE,
+  MESSAGE: ENTRY_MESSAGE,
+  BASH_EXECUTION: ENTRY_BASH_EXECUTION,
+  CUSTOM_MESSAGE: ENTRY_CUSTOM_MESSAGE,
 } as const
 
 export class Projector {
@@ -113,11 +121,21 @@ export class Projector {
       case ENTRY_CUSTOM:
         result = { ...base, role: 'custom', contextRole: 'conversation', fragments: this.projectCustom(entry) }
         break
+      case ENTRY_MESSAGE:
+        result = this.projectPiMessage(entry)
+        break
+      case ENTRY_BASH_EXECUTION:
+        result = { ...base, role: 'tool', contextRole: 'conversation', fragments: this.projectBashExecution(entry) }
+        break
+      case ENTRY_CUSTOM_MESSAGE:
+        result = { ...base, role: 'custom', contextRole: 'conversation', fragments: this.projectCustomMessage(entry) }
+        break
       case ENTRY_SESSION_INFO:
         result = { ...base, role: 'metadata', contextRole: 'metadata', fragments: this.projectSessionName(entry) }
         break
       case ENTRY_MODEL_CHANGE:
       case ENTRY_THINKING_CHANGE:
+      case ENTRY_THINKING_LEVEL_CHANGE:
       case ENTRY_EXTENSION_STATE:
         result = { ...base, role: 'metadata', contextRole: 'control', fragments: [] }
         break
@@ -130,6 +148,7 @@ export class Projector {
         break
     }
     result.fragments = result.fragments.map((fragment) => ({ ...fragment, sessionId }))
+    result.sessionId = sessionId
     return result
   }
 
@@ -204,6 +223,128 @@ export class Projector {
     return [this.fragment(entry, kind, summary, 0)]
   }
 
+  private projectPiMessage(entry: RawEntry): ProjectionResult {
+    const message = entry['message']
+    if (!isRecord(message)) {
+      return {
+        sessionId: entry.id,
+        entryId: entry.id,
+        entryType: entry.type,
+        timestamp: entry.timestamp,
+        parentId: entry.parentId,
+        role: 'metadata',
+        contextRole: 'conversation',
+        fragments: [],
+      }
+    }
+    const role = typeof message['role'] === 'string' ? message['role'] : ''
+    switch (role) {
+      case 'user': {
+        const text = textFromContent(message['content'])
+        const fragments = text.length > 0 ? [this.fragment(entry, SEMANTIC_KINDS.USER_TEXT, text, 0)] : []
+        return this.projection(entry, 'user', 'conversation', fragments)
+      }
+      case 'assistant': {
+        const fragments = this.projectAssistantContent(entry, message['content'])
+        return this.projection(entry, 'assistant', 'conversation', fragments)
+      }
+      case 'toolResult': {
+        const toolName = typeof message['toolName'] === 'string' ? message['toolName'] : ''
+        const toolCallId = typeof message['toolCallId'] === 'string' ? message['toolCallId'] : undefined
+        const isError = message['isError'] === true
+        const text = textFromContent(message['content'])
+        if (text.length === 0 && toolName.length === 0) {
+          return this.projection(entry, 'tool', 'conversation', [])
+        }
+        const fragment = this.fragment(entry, SEMANTIC_KINDS.TOOL_RESULT, toolName.length > 0 ? `${toolName}\n${text}` : text, 0)
+        fragment.toolName = toolName.length > 0 ? toolName : undefined
+        fragment.toolCallId = toolCallId
+        fragment.isError = isError
+        return this.projection(entry, 'tool', 'conversation', [fragment])
+      }
+      default:
+        return this.projection(entry, 'metadata', 'conversation', [])
+    }
+  }
+
+  private projectAssistantContent(entry: RawEntry, content: unknown): Fragment[] {
+    const fragments: Fragment[] = []
+    if (!Array.isArray(content)) return fragments
+    let toolIndex = 0
+    let textIndex = 0
+    for (const block of content) {
+      if (!isRecord(block)) continue
+      const blockType = block['type']
+      if (blockType === 'text' && typeof block['text'] === 'string' && block['text'].length > 0) {
+        fragments.push(this.fragment(entry, SEMANTIC_KINDS.ASSISTANT_TEXT, block['text'], textIndex))
+        textIndex += 1
+        continue
+      }
+      if (blockType === 'thinking') {
+        // assistant.thinking is deliberately excluded from the MVP.
+        continue
+      }
+      if (blockType === 'toolCall') {
+        const name = typeof block['name'] === 'string' ? block['name'] : ''
+        const toolCallId = typeof block['id'] === 'string' ? block['id'] : undefined
+        if (name.length === 0) continue
+        const args = normalizeArguments(block['arguments'])
+        const fragment = this.fragment(entry, SEMANTIC_KINDS.TOOL_CALL, `${name}\n${args}`, toolIndex)
+        fragment.toolName = name
+        fragment.toolCallId = toolCallId
+        fragments.push(fragment)
+        toolIndex += 1
+      }
+    }
+    return fragments
+  }
+
+  private projectBashExecution(entry: RawEntry): Fragment[] {
+    const fragments: Fragment[] = []
+    const command = stringField(entry, 'command') ?? ''
+    if (command.length > 0) {
+      const fragment = this.fragment(entry, SEMANTIC_KINDS.BASH_COMMAND, command, 0)
+      fragment.toolName = 'bash'
+      fragments.push(fragment)
+    }
+    const output = stringField(entry, 'output') ?? ''
+    if (output.length > 0) {
+      const fragment = this.fragment(entry, SEMANTIC_KINDS.BASH_OUTPUT, output, 1)
+      fragment.toolName = 'bash'
+      const exitCode = entry['exitCode']
+      fragment.isError = typeof exitCode === 'number' && exitCode !== 0
+      fragments.push(fragment)
+    }
+    return fragments
+  }
+
+  private projectCustomMessage(entry: RawEntry): Fragment[] {
+    const customType = stringField(entry, 'customType') ?? ''
+    const text = textFromContent(entry['content'])
+    if (text.length === 0) return []
+    const fragment = this.fragment(entry, SEMANTIC_KINDS.CUSTOM_MESSAGE, customType.length > 0 ? `${customType}\n${text}` : text, 0)
+    fragment.customType = customType.length > 0 ? customType : undefined
+    return [fragment]
+  }
+
+  private projection(
+    entry: RawEntry,
+    role: Role,
+    contextRole: ContextRole,
+    fragments: Fragment[],
+  ): ProjectionResult {
+    return {
+      sessionId: '',
+      entryId: entry.id,
+      entryType: entry.type,
+      timestamp: entry.timestamp,
+      parentId: entry.parentId,
+      role,
+      contextRole,
+      fragments,
+    }
+  }
+
   private projectCustom(entry: RawEntry): Fragment[] {
     const customType = stringField(entry, 'customType') ?? ''
     if (!this.customSearchableTypes.has(customType)) return []
@@ -235,6 +376,18 @@ export class Projector {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (isRecord(block) && block['type'] === 'text' && typeof block['text'] === 'string') {
+      parts.push(block['text'])
+    }
+  }
+  return parts.join('\n')
 }
 
 function stringField(entry: RawEntry, key: string): string | null {

@@ -24,7 +24,7 @@ export interface ToolDefinition {
 export const eventSearchToolDefinition: ToolDefinition = {
   name: 'event_search',
   description:
-    'Search persisted Pi session events as typed semantic fragments. Returns bounded event hits with (sessionId, entryId) provenance.',
+    'Read-only search over persisted Pi session events as typed semantic fragments. Returns bounded event hits with (sessionId, entryId) provenance.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -32,6 +32,7 @@ export const eventSearchToolDefinition: ToolDefinition = {
       sessionId: { type: 'string', description: 'Optional explicit session to search.' },
       cwd: { type: 'string', description: 'Optional workspace directory filter.' },
       kinds: { type: 'array', items: { type: 'string' } },
+      entryTypes: { type: 'array', items: { type: 'string' } },
       roles: { type: 'array', items: { type: 'string' } },
       toolNames: { type: 'array', items: { type: 'string' } },
       errorOnly: { type: 'boolean' },
@@ -46,7 +47,7 @@ export const eventSearchToolDefinition: ToolDefinition = {
 export const eventReadToolDefinition: ToolDefinition = {
   name: 'event_read',
   description:
-    'Read one authorized source event by (sessionId, entryId) with bounded text windows and exact truncation receipts.',
+    'Read-only lookup of one authorized source event by (sessionId, entryId) with bounded text windows and exact truncation receipts.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -65,7 +66,7 @@ export const eventReadToolDefinition: ToolDefinition = {
 export const eventTraceToolDefinition: ToolDefinition = {
   name: 'event_trace',
   description:
-    'Return the bounded local relationship graph for one event: parent, children, derived branch siblings, and related edges.',
+    'Read-only trace of the bounded local relationship graph for one event: parent, children, derived branch siblings, and related edges.',
   inputSchema: {
     type: 'object',
     properties: {

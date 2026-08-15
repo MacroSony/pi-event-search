@@ -139,12 +139,10 @@ export function appendNeighbors(
   const entry = tree.byId.get(entryId)
   if (!entry) return { before: [], after: [] }
   const seq = entry.appendSeq
-  const beforeList = tree.entries
-    .filter((e) => e.appendSeq < seq)
-    .slice(-Math.max(0, before))
-  const afterList = tree.entries
-    .filter((e) => e.appendSeq > seq)
-    .slice(0, Math.max(0, after))
+  const previous = tree.entries.filter((e) => e.appendSeq < seq)
+  const next = tree.entries.filter((e) => e.appendSeq > seq)
+  const beforeList = before <= 0 ? [] : previous.slice(-before)
+  const afterList = after <= 0 ? [] : next.slice(0, after)
   return { before: beforeList, after: afterList }
 }
 

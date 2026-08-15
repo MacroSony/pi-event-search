@@ -67,7 +67,7 @@ export function extractRelationships(
   // compacts / branch-summary-from / labels from explicit recorded payload fields.
   for (const entry of tree.entries) {
     if (entry.entryType === 'compaction') {
-      const upTo = stringField(entry, 'compactedUpToId') ?? stringField(entry, 'fromId')
+      const upTo = stringField(entry, 'compactedUpToId') ?? stringField(entry, 'firstKeptEntryId') ?? stringField(entry, 'fromId')
       if (upTo !== null) {
         records.push({
           sourceSessionId: sessionId,
