@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSessionText, parseLines, decideIncremental, hashHeader } from '../src/parser.ts'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { parseSessionText, parseLines, decideIncremental, hashHeader, readSessionHeader } from '../src/parser.ts'
 import { SourceParseError } from '../src/errors.ts'
 
 test('parses a valid session with header and entries', () => {
@@ -39,6 +42,26 @@ test('rejects entries missing required identity fields', () => {
 `),
     SourceParseError,
   )
+})
+
+test('readSessionHeader reads only the header record', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-header-'))
+  const file = path.join(dir, 's1.jsonl')
+  fs.writeFileSync(file, `{"type":"session","version":3,"id":"s1","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"hello"}
+`)
+  const header = readSessionHeader(file)
+  assert.equal(header.sessionId, 's1')
+  assert.equal(header.cwd, '/tmp/ws')
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('readSessionHeader reports malformed header records', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-header-bad-'))
+  const file = path.join(dir, 'bad.jsonl')
+  fs.writeFileSync(file, '{broken\n')
+  assert.throws(() => readSessionHeader(file), SourceParseError)
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('detects append vs rebuild decisions', () => {

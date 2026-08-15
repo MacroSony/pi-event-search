@@ -6,8 +6,8 @@ import path from 'node:path'
 import { SearchProvider } from '../src/index/provider.ts'
 import { IndexMaintainer } from '../src/index/maintainer.ts'
 
-function writeSession(filePath: string, sessionId: string, entries: Array<{ id: string; text: string }>): string {
-  const lines = [`{"sessionId":"${sessionId}","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}`]
+function writeSession(filePath: string, sessionId: string, entries: Array<{ id: string; text: string }>, cwd = '/tmp/ws'): string {
+  const lines = [`{"sessionId":"${sessionId}","createdAt":"2026-01-01T00:00:00.000Z","cwd":"${cwd}"}`]
   let parent: string | null = null
   let seconds = 0
   for (const entry of entries) {
@@ -127,6 +127,57 @@ test('maintainer removes the old session when the session id changes', () => {
   maintainer.refresh()
   assert.equal(provider.hasSession('old-id'), false)
   assert.equal(provider.hasSession('new-id'), true)
+  provider.close()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('scopedRefresh indexes only sessions authorized for the workspace root', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-scoped-'))
+  const wsFile = path.join(dir, 'ws.jsonl')
+  const otherFile = path.join(dir, 'other.jsonl')
+  writeSession(wsFile, 'ws-session', [{ id: 'A', text: 'workspace entry' }], '/tmp/ws')
+  writeSession(otherFile, 'other-session', [{ id: 'A', text: 'other entry' }], '/tmp/other')
+
+  const provider = new SearchProvider()
+  const maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [dir] } })
+  maintainer.scopedRefresh('/tmp/ws')
+  assert.equal(provider.hasSession('ws-session'), true)
+  assert.equal(provider.hasSession('other-session'), false)
+  assert.equal(provider.searchEvents({ query: 'workspace' }, { authRoot: '/tmp/ws' }).length, 1)
+
+  // Workspace change drops old indexed sessions and picks up the new root.
+  maintainer.scopedRefresh('/tmp/other')
+  assert.equal(provider.hasSession('ws-session'), false)
+  assert.equal(provider.hasSession('other-session'), true)
+  assert.equal(provider.searchEvents({ query: 'other' }, { authRoot: '/tmp/other' }).length, 1)
+
+  provider.close()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('syncFile stat fast path skips re-parsing unchanged current sessions', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-fastpath-'))
+  const file = path.join(dir, 's1.jsonl')
+  writeSession(file, 's1', [{ id: 'A', text: 'good entry' }])
+  const provider = new SearchProvider()
+  const maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [dir] } })
+
+  // Use a whole-second mtime so the fast-path comparison is exact.
+  const fixedTime = new Date(1700000000000)
+  fs.utimesSync(file, fixedTime, fixedTime)
+  maintainer.scopedRefresh('/tmp/ws')
+  const before = fs.statSync(file)
+
+  // Corrupt the source but keep size and mtime identical. The fast path must
+  // return unchanged without parsing the corrupted body.
+  const originalText = fs.readFileSync(file, 'utf8')
+  fs.writeFileSync(file, `${originalText.slice(0, -1)}!`)
+  fs.utimesSync(file, fixedTime, fixedTime)
+
+  const item = maintainer.syncFile(file)
+  assert.equal(item.action, 'unchanged')
+  assert.equal(provider.searchEvents({ query: 'good' }, { authRoot: '/tmp/ws' }).length, 1)
+
   provider.close()
   fs.rmSync(dir, { recursive: true, force: true })
 })

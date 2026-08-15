@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import { discoverSessionFiles, type DiscoveryConfig } from '../auth/discovery.ts'
-import { decideIncremental, parseLines, sourceInfoFromLines } from '../parser.ts'
-import type { ParsedSession, SessionSourceInfo } from '../types.ts'
+import { isPathWithin, normalizePath } from '../auth/paths.ts'
+import { decideIncremental, parseLines, readSessionHeader, sourceInfoFromLines } from '../parser.ts'
+import type { ParsedSession, SessionHeader, SessionSourceInfo } from '../types.ts'
 import type { SearchProvider } from './provider.ts'
 
 export interface MaintainerConfig {
@@ -66,14 +67,81 @@ export class IndexMaintainer {
     return report
   }
 
+  /**
+   * Full scoped discovery for a resolved workspace root.
+   *
+   * Session files are first filtered by header-only inspection: only headers
+   * whose recorded cwd is inside `root` are parsed and indexed. Sessions that
+   * are already indexed but are not part of the authorized set are removed.
+   *
+   * This is intended to run at startup or after a workspace change, not on
+   * every turn or tool call.
+   */
+  scopedRefresh(root: string): SyncReport {
+    const normalizedRoot = normalizePath(root)
+    const files = discoverSessionFiles(this.discoveryConfig)
+    const report: SyncReport = { items: [], removedSessionIds: [] }
+    const authorizedFiles: string[] = []
+
+    for (const filePath of files) {
+      let header: SessionHeader
+      try {
+        header = readSessionHeader(filePath)
+      } catch (err) {
+        report.items.push({ filePath, action: 'error', error: (err as Error).message })
+        continue
+      }
+      if (isPathWithin(header.cwd, normalizedRoot)) {
+        authorizedFiles.push(filePath)
+      }
+    }
+
+    for (const filePath of authorizedFiles) {
+      report.items.push(this.syncFile(filePath))
+    }
+
+    const observed = new Set(authorizedFiles.map(canonicalIfExists))
+    const toRemove: string[] = []
+    for (const session of this.provider.sessionsList) {
+      const comparable = canonicalIfExists(session.sourceInfo.filePath)
+      if (!observed.has(comparable)) toRemove.push(session.header.sessionId)
+    }
+    for (const sessionId of toRemove) {
+      this.provider.removeSession(sessionId)
+      this.rebuildFileMap()
+      report.removedSessionIds.push(sessionId)
+      report.items.push({ filePath: sessionId, action: 'removed', sessionId })
+    }
+
+    this.rebuildFileMap()
+    return report
+  }
+
   syncFile(filePath: string): SyncItem {
-    let text: string
     let stat: fs.Stats
     try {
       stat = fs.statSync(filePath)
-      text = fs.readFileSync(filePath, 'utf8')
     } catch (err) {
       return { filePath, action: 'error', error: (err as Error).message }
+    }
+
+    const previous = this.previousSourceInfo(filePath)
+    if (
+      previous !== undefined &&
+      previous.size === stat.size &&
+      previous.mtimeMs === stat.mtimeMs
+    ) {
+      // Cheap source observation: unchanged size and mtime means the file is
+      // unchanged for local dogfood purposes. This avoids re-reading the full
+      // current-session file on every turn and tool call.
+      return { filePath, action: 'unchanged', sessionId: previous.header.sessionId }
+    }
+
+    let text: string
+    try {
+      text = fs.readFileSync(filePath, 'utf8')
+    } catch (err) {
+      return { filePath, action: 'error', sessionId: previous?.header.sessionId, error: (err as Error).message }
     }
 
     let parsed: ParsedSession
@@ -88,7 +156,6 @@ export class IndexMaintainer {
       return { filePath, action: 'error', sessionId, error: (err as Error).message }
     }
 
-    const previous = this.previousSourceInfo(filePath)
     try {
       if (previous === undefined) {
         this.provider.indexSession(parsed, current)

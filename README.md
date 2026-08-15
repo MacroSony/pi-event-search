@@ -42,16 +42,16 @@ A search result should retain what produced it: the session, entry, fragment kin
 
 ## Implementation status
 
-- `src/parser.ts` — JSONL parser for fixture and Pi persisted session formats.
+- `src/parser.ts` — JSONL parser for fixture and Pi persisted session formats; header-only reader for scoped discovery.
 - `src/projector.ts` — typed semantic projection; private thinking excluded.
 - `src/tree.ts` — append/branch order, materialized leaf, fork rules.
 - `src/relationships.ts` — recorded/inferred relationship extraction.
 - `src/index/provider.ts` — in-memory SQLite FTS5 search/read/trace provider.
-- `src/index/maintainer.ts` — incremental append/rebuild/removal lifecycle.
+- `src/index/maintainer.ts` — incremental append/rebuild/removal lifecycle; scoped root refresh plus hot-path stat fast path.
 - `src/auth/*` — session discovery and workspace-root authorization.
 - `src/api/service.ts`, `src/tools.ts` — bounded public tool layer.
 - `src/pi-adapter.ts` — indexes the current session from Pi's SessionManager.
-- `extension.ts` — Pi extension entrypoint (`pi -e ./extension.ts`).
+- `extension.ts` — Pi extension entrypoint (`pi -e ./extension.ts`). Full scoped discovery runs only at startup/workspace change; turns and tools sync only the current session file.
 
 Run the test suite and typecheck:
 

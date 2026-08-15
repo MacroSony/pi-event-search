@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import { SourceParseError } from './errors.ts'
 import type { ParsedSession, RawEntry, SessionHeader, SessionSourceInfo } from './types.ts'
 
@@ -20,6 +21,52 @@ export function fnv1a(input: string): string {
 export function parseSessionText(text: string, filePath = '<memory>'): ParsedSession {
   const parsed = parseLines(text, filePath)
   return { header: parsed.header, entries: parsed.entries }
+}
+
+const HEADER_READ_BLOCK_SIZE = 64 * 1024
+
+/**
+ * Read only the first JSONL record of a session file and parse it as the
+ * session header. This keeps scoped discovery from reading full session
+ * bodies (which can be hundreds of MB across a workspace history).
+ *
+ * The first non-empty line is treated as the header. If no parseable header
+ * fits in the initial read block the file is reported as a source error.
+ */
+export function readSessionHeader(filePath: string): SessionHeader {
+  let fd: number
+  try {
+    fd = fs.openSync(filePath, 'r')
+  } catch (err) {
+    throw new SourceParseError(`${filePath}: cannot open file: ${(err as Error).message}`)
+  }
+  try {
+    const buffer = Buffer.alloc(HEADER_READ_BLOCK_SIZE)
+    const bytesRead = fs.readSync(fd, buffer, 0, HEADER_READ_BLOCK_SIZE, 0)
+    const text = buffer.toString('utf8', 0, bytesRead)
+    const rawLines = text.split(/\r?\n/)
+    let lineNumber = 0
+    for (const raw of rawLines) {
+      lineNumber += 1
+      if (raw.trim() === '') continue
+      let value: unknown
+      try {
+        value = JSON.parse(raw)
+      } catch (err) {
+        throw new SourceParseError(
+          `${filePath}:${lineNumber}: invalid JSONL header record: ${(err as Error).message}`,
+          lineNumber,
+        )
+      }
+      if (!isRecord(value)) {
+        throw new SourceParseError(`${filePath}:${lineNumber}: header record is not a JSON object`, lineNumber)
+      }
+      return parseHeader(value, filePath, lineNumber)
+    }
+    throw new SourceParseError(`${filePath}: session header not found in the first ${HEADER_READ_BLOCK_SIZE} bytes`)
+  } finally {
+    fs.closeSync(fd)
+  }
 }
 
 export function parseLines(text: string, filePath = '<memory>'): ParsedLines {
