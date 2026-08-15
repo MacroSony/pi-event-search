@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSessionText, parseLines, decideIncremental } from '../src/parser.ts'
+import { parseSessionText, parseLines, decideIncremental, hashHeader } from '../src/parser.ts'
 import { SourceParseError } from '../src/errors.ts'
 
 test('parses a valid session with header and entries', () => {
@@ -50,10 +50,12 @@ test('detects append vs rebuild decisions', () => {
   const info = {
     filePath: '<m>', size: text.length, mtimeMs: 0, header: lines.header,
     entryCount: 1, firstEntryId: 'A', lastEntryId: 'A', entryHashes: lines.entryHashes.slice(0, 1),
+    headerHash: hashHeader(lines.header),
   }
   const current = {
     filePath: '<m>', size: text.length, mtimeMs: 0, header: lines.header,
     entryCount: 2, firstEntryId: 'A', lastEntryId: 'B', entryHashes: lines.entryHashes,
+    headerHash: hashHeader(lines.header),
   }
   assert.equal(decideIncremental(info, current), 'append')
 

@@ -1,5 +1,5 @@
-import { parseSessionText, type ParsedSession } from '../src/parser.ts'
-import type { SessionSourceInfo } from '../src/types.ts'
+import { parseSessionText, hashHeader } from '../src/parser.ts'
+import type { ParsedSession, SessionSourceInfo } from '../src/types.ts'
 
 export const TREE_SESSION = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
 {"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"hello searchable world"}
@@ -27,10 +27,16 @@ export function makeSourceInfo(parsed: ParsedSession, filePath = '<memory>', siz
     entryCount: parsed.entries.length,
     firstEntryId: parsed.entries[0]?.id ?? null,
     lastEntryId: parsed.entries[parsed.entries.length - 1]?.id ?? null,
-    entryHashes: parsed.entries.map((_, index) => `hash-${index}`),
+    entryHashes: parsed.entries.map((_entry, index) => `hash-${index}`),
+    headerHash: hashHeader(parsed.header),
   }
 }
 
 export function parse(text: string): ParsedSession {
   return parseSessionText(text)
+}
+
+export function targetEntryId(to: import('../src/types.ts').TraceEdge['to'] | undefined): string | undefined {
+  if (to === undefined) return undefined
+  return 'entryId' in to ? to.entryId : undefined
 }

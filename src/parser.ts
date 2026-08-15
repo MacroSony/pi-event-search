@@ -140,7 +140,18 @@ export function sourceInfoFromLines(
     firstEntryId: parsed.entries[0]?.id ?? null,
     lastEntryId: parsed.entries[parsed.entries.length - 1]?.id ?? null,
     entryHashes: parsed.entryHashes,
+    headerHash: hashHeader(parsed.header),
   }
+}
+
+export function hashHeader(header: SessionHeader): string {
+  const canonical = {
+    sessionId: header.sessionId,
+    createdAt: header.createdAt,
+    cwd: header.cwd,
+    parentSession: header.parentSession ?? null,
+  }
+  return fnv1a(JSON.stringify(canonical))
 }
 
 export type IncrementalDecision = 'same' | 'append' | 'rebuild'
@@ -157,6 +168,7 @@ export function decideIncremental(
   previous: SessionSourceInfo,
   current: SessionSourceInfo,
 ): IncrementalDecision {
+  if (previous.headerHash !== current.headerHash) return 'rebuild'
   if (current.entryCount < previous.entryCount) return 'rebuild'
   if (previous.entryCount === 0) {
     return current.entryCount === 0 ? 'same' : 'rebuild'

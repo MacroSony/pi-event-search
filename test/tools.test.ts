@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SearchProvider } from '../src/index/provider.ts'
+import { targetEntryId } from './helpers.ts'
 import { PiEventSearchService } from '../src/api/service.ts'
 import { handleEventSearch, handleEventRead, handleEventTrace } from '../src/tools.ts'
 import { parseSessionText } from '../src/parser.ts'
@@ -41,7 +42,7 @@ test('event_trace returns recorded and derived edges', () => {
   const response = handleEventTrace(svc, { sessionId: 's1', entryId: 'E' }, { cwd: '/tmp/ws' })
   assert.equal(response.ok, true)
   if (response.ok) {
-    assert.equal(response.result.parent?.to.entryId, 'B')
+    assert.equal(targetEntryId(response.result.parent?.to), 'B')
     assert.equal(response.result.branchSiblings[0].derived, true)
   }
 })

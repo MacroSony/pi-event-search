@@ -26,9 +26,6 @@ export const RELATIONSHIP_TYPES = {
   FILE_CHANGED: 'file-changed',
 } as const
 
-const READ_TOOLS = new Set(['read_file', 'open_file', 'list_files', 'read_lints', 'grep'])
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file', 'delete_file', 'apply_patch'])
-
 export function extractRelationships(
   sessionId: string,
   tree: SessionTree,
@@ -125,23 +122,16 @@ export function extractRelationships(
     }
   }
 
-  // file evidence derived from recognized tool calls.
+  // File evidence is derived once by the projector and attached to tool.call
+  // fragments. Relationship extraction only materializes those inferred edges.
   for (const entry of tree.entries) {
-    if (entry.entryType !== 'assistant') continue
-    const toolCalls = entry['toolCalls']
-    if (!Array.isArray(toolCalls)) continue
-    for (const rawCall of toolCalls) {
-      if (!isRecord(rawCall)) continue
-      const name = typeof rawCall['name'] === 'string' ? rawCall['name'] : ''
-      const args = rawCall['arguments']
-      const paths = extractFilePaths(args)
-      for (const filePath of paths) {
-        const type = READ_TOOLS.has(name)
-          ? RELATIONSHIP_TYPES.FILE_READ
-          : WRITE_TOOLS.has(name)
-            ? RELATIONSHIP_TYPES.FILE_CHANGED
-            : null
-        if (type === null) continue
+    for (const fragment of entry.fragments) {
+      if (fragment.semanticKind !== 'tool.call') continue
+      if (fragment.fileEvidenceType === undefined || fragment.filePaths === undefined) continue
+      const type = fragment.fileEvidenceType === 'file-read'
+        ? RELATIONSHIP_TYPES.FILE_READ
+        : RELATIONSHIP_TYPES.FILE_CHANGED
+      for (const filePath of fragment.filePaths) {
         records.push({
           sourceSessionId: sessionId,
           sourceEntryId: entry.id,
@@ -151,7 +141,7 @@ export function extractRelationships(
           type,
           recorded: false,
           derived: true,
-          detail: name,
+          detail: fragment.toolName,
         })
       }
     }
@@ -177,32 +167,7 @@ export function extractSessionParentEdge(
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function stringField(entry: EntryRecord, key: string): string | null {
   const value = entry[key]
   return typeof value === 'string' ? value : null
-}
-
-function extractFilePaths(args: unknown): string[] {
-  const result: string[] = []
-  if (typeof args === 'string') {
-    // A string argument is only treated as a path for single-file operations.
-    result.push(args)
-    return result
-  }
-  if (!isRecord(args)) return result
-  for (const key of ['filePath', 'file', 'path', 'to', 'from', 'target']) {
-    const value = args[key]
-    if (typeof value === 'string' && value.length > 0) result.push(value)
-  }
-  const files = args['files']
-  if (Array.isArray(files)) {
-    for (const file of files) {
-      if (typeof file === 'string') result.push(file)
-    }
-  }
-  return [...new Set(result)]
 }

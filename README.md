@@ -53,11 +53,14 @@ A search result should retain what produced it: the session, entry, fragment kin
 - `src/pi-adapter.ts` — indexes the current session from Pi's SessionManager.
 - `extension.ts` — Pi extension entrypoint (`pi -e ./extension.ts`).
 
-Run the test suite:
+Run the test suite and typecheck:
 
 ```bash
-node --test --experimental-strip-types test/*.test.ts
+npm install
+npm run check
 ```
+
+`npm run check` runs `tsc --noEmit` plus the full `node --test` suite.
 
 ## Initial boundary
 

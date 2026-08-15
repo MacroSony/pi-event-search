@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SearchProvider } from '../src/index/provider.ts'
+import { targetEntryId } from './helpers.ts'
 import { parseSessionText } from '../src/parser.ts'
 import { TREE_SESSION, TOOL_SESSION, makeSourceInfo } from './helpers.ts'
 import { PiEventSearchError } from '../src/errors.ts'
@@ -146,6 +147,59 @@ test('readEvent offset moves a fixed-size contiguous window', () => {
   provider.close()
 })
 
+test('readEvent exposes only bounded previews and enforces aggregate cap', () => {
+  // Five tool-call fragments, each large, in one assistant entry.
+  const toolCalls = Array.from({ length: 5 }, (_, i) => ({
+    toolCallId: `tc${i}`,
+    name: 'bash',
+    arguments: { command: `echo ${'x'.repeat(5000)} ${i}` },
+  }))
+  const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"assistant","text":"hi","toolCalls":${JSON.stringify(toolCalls)}}
+`
+  const provider = providerWith(text)
+  const read = provider.readEvent('s1', 'A', {}, '/tmp/ws')
+  assert.equal(read.fragments.length, 6)
+  assert.equal('text' in read.fragments[0], false)
+  for (const fragment of read.fragments) {
+    const shownChars = fragment.preview.shownRanges.reduce((sum, range) => sum + (range.end - range.start), 0)
+    assert.ok(shownChars <= 1000, `shown ${shownChars} exceeds aggregate per-fragment budget`)
+    if (fragment.semanticKind === 'assistant.text') {
+      assert.equal(fragment.preview.truncated, false)
+    } else {
+      assert.ok(fragment.preview.truncated)
+    }
+  }
+  provider.close()
+})
+
+test('search pages through global FTS results instead of hiding valid hits', () => {
+  // 1500 short user.text fragments rank above one long assistant.text. A
+  // single global FTS cap would hide the assistant hit; paging must find it.
+  const lines = ['{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}']
+  for (let i = 0; i < 1500; i += 1) {
+    lines.push(JSON.stringify({
+      id: `u${i}`,
+      parentId: i === 0 ? null : `u${i - 1}`,
+      timestamp: new Date(1700000000000 + i * 1000).toISOString(),
+      type: 'user',
+      text: 'paging term',
+    }))
+  }
+  lines.push(JSON.stringify({
+    id: 'a1',
+    parentId: 'u1499',
+    timestamp: new Date(1700000000000 + 1500 * 1000).toISOString(),
+    type: 'assistant',
+    text: `paging term ${'z'.repeat(8000)}`,
+  }))
+  const provider = providerWith(lines.join('\n'))
+  const hits = provider.searchEvents({ query: 'paging', roles: ['assistant'] }, { authRoot: '/tmp/ws' }, 10)
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].entryId, 'a1')
+  provider.close()
+})
+
 test('readEvent branch order reconstructs conversational context', () => {
   const provider = providerWith(TREE_SESSION)
   const read = provider.readEvent('s1', 'B', { order: 'branch', before: 2, after: 2 }, '/tmp/ws')
@@ -165,15 +219,15 @@ test('readEvent append order uses durable JSONL chronology', () => {
 test('traceEvent reports recorded parent/children and derived branch siblings', () => {
   const provider = providerWith(TREE_SESSION)
   const traceE = provider.traceEvent('s1', 'E', '/tmp/ws')
-  assert.equal(traceE.parent?.to.entryId, 'B')
-  assert.deepEqual(traceE.children.map((edge) => edge.to.entryId), ['F'])
-  assert.deepEqual(traceE.branchSiblings.map((edge) => edge.to.entryId), ['C'])
+  assert.equal(targetEntryId(traceE.parent?.to), 'B')
+  assert.deepEqual(traceE.children.map((edge) => targetEntryId(edge.to)), ['F'])
+  assert.deepEqual(traceE.branchSiblings.map((edge) => targetEntryId(edge.to)), ['C'])
   assert.equal(traceE.branchSiblings[0].derived, true)
   assert.equal(traceE.branchSiblings[0].recorded, false)
 
   const traceB = provider.traceEvent('s1', 'B', '/tmp/ws')
-  assert.deepEqual(traceB.children.map((edge) => edge.to.entryId), ['C', 'E'])
-  assert.equal(traceB.parent?.to.entryId, 'A')
+  assert.deepEqual(traceB.children.map((edge) => targetEntryId(edge.to)), ['C', 'E'])
+  assert.equal(targetEntryId(traceB.parent?.to), 'A')
   provider.close()
 })
 
@@ -182,7 +236,7 @@ test('traceEvent reports tool-result-for relationship', () => {
   const traceC = provider.traceEvent('s2', 'C', '/tmp/ws')
   const toolEdge = traceC.related.find((edge) => edge.type === 'tool-result-for')
   assert.ok(toolEdge)
-  assert.equal(toolEdge.to.entryId, 'B')
+  assert.equal(targetEntryId(toolEdge.to), 'B')
   assert.equal(toolEdge.recorded, true)
   provider.close()
 })

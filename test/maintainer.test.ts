@@ -88,6 +88,49 @@ test('maintainer preserves last known-good index on parse failure', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('maintainer rebuilds when header metadata changes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-maint-header-'))
+  const file = path.join(dir, 's1.jsonl')
+  const provider = new SearchProvider()
+  const maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [dir] } })
+
+  writeSession(file, 's1', [{ id: 'A', text: 'header entry' }])
+  maintainer.refresh()
+  assert.equal(provider.getSession('s1')?.header.cwd, '/tmp/ws')
+
+  // Same entries, different recorded cwd: this must be a rebuild so
+  // authorization metadata is refreshed.
+  const lines = [`{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/other-ws"}`]
+  lines.push(JSON.stringify({ id: 'A', parentId: null, timestamp: '2026-01-01T00:00:01.000Z', type: 'user', text: 'header entry' }))
+  fs.writeFileSync(file, lines.join('\n') + '\n')
+  const report = maintainer.refresh()
+  const item = report.items.find((entry) => entry.filePath === file)
+  assert.equal(item?.action, 'indexed')
+  assert.equal(provider.getSession('s1')?.header.cwd, '/tmp/other-ws')
+  provider.close()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('maintainer removes the old session when the session id changes', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-maint-id-'))
+  const file = path.join(dir, 's1.jsonl')
+  const provider = new SearchProvider()
+  const maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [dir] } })
+
+  writeSession(file, 'old-id', [{ id: 'A', text: 'same entry' }])
+  maintainer.refresh()
+  assert.equal(provider.hasSession('old-id'), true)
+
+  const lines = [`{"sessionId":"new-id","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}`]
+  lines.push(JSON.stringify({ id: 'A', parentId: null, timestamp: '2026-01-01T00:00:01.000Z', type: 'user', text: 'same entry' }))
+  fs.writeFileSync(file, lines.join('\n') + '\n')
+  maintainer.refresh()
+  assert.equal(provider.hasSession('old-id'), false)
+  assert.equal(provider.hasSession('new-id'), true)
+  provider.close()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('maintainer skips a new file that cannot be parsed', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-maint-newbad-'))
   const file = path.join(dir, 'bad.jsonl')

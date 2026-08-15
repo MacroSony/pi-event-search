@@ -42,6 +42,8 @@ export interface SessionSourceInfo {
   lastEntryId: string | null
   /** Hash per raw entry line, used to detect mid-file rewrites. */
   entryHashes: string[]
+  /** Hash of canonical header fields; header changes force a rebuild. */
+  headerHash: string
 }
 
 // ---------------------------------------------------------------------------
@@ -54,13 +56,15 @@ export interface EntryIdentity {
 }
 
 /** An entry enriched with append and tree position plus classifications. */
-export interface EntryRecord extends RawEntry {
+export type EntryRecord = RawEntry & {
   sessionId: string
+  entryType: string
   appendSeq: number
   branchState: BranchState
   selectionState: SelectionState
   contextRole: ContextRole
   role: Role
+  fragments: Fragment[]
 }
 
 export type BranchState = 'selected' | 'alternate' | 'unknown'
@@ -103,6 +107,9 @@ export interface Fragment {
   toolCallId?: string
   isError?: boolean
   customType?: string
+  /** Best-effort file evidence for recognized tool calls (inferred, not recorded). */
+  filePaths?: string[]
+  fileEvidenceType?: 'file-read' | 'file-changed'
 }
 
 /** The public retrieval concept: one entry projected to typed fragments. */
@@ -181,10 +188,11 @@ export interface ReadEventNeighbor {
 
 export interface ReadEventFragment {
   semanticKind: SemanticKind
-  text: string
   toolName?: string
   isError?: boolean
   customType?: string
+  /** The only public text surface; bounded by aggregate and per-fragment caps. */
+  preview: TextPreview
 }
 
 export interface ReadEventResult {
@@ -197,7 +205,7 @@ export interface ReadEventResult {
   selectionState: SelectionState
   role: Role
   contextRole: ContextRole
-  fragments: Array<ReadEventFragment & { preview: TextPreview }>
+  fragments: ReadEventFragment[]
   neighbors: {
     order: ReadOrder
     before: ReadEventNeighbor[]
@@ -242,7 +250,7 @@ export interface TraceNode {
 export interface TraceEdge {
   type: string
   from: EntryIdentity
-  to: EntryIdentity | { sessionId: string } | { fileRef: string }
+  to: EntryIdentity | { fileRef: string }
   recorded: boolean
   derived?: boolean
   detail?: string

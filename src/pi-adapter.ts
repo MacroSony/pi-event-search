@@ -1,4 +1,5 @@
 import type { ParsedSession, RawEntry, SessionHeader } from './types.ts'
+import { hashHeader } from './parser.ts'
 
 /**
  * A minimal view of Pi's ReadonlySessionManager sufficient for indexing the
@@ -61,5 +62,6 @@ export function sourceInfoForParsedSession(
     firstEntryId: parsed.entries[0]?.id ?? null,
     lastEntryId: parsed.entries[parsed.entries.length - 1]?.id ?? null,
     entryHashes: parsed.entries.map((_entry, index) => `adapter-${index}`),
+    headerHash: hashHeader(parsed.header),
   }
 }

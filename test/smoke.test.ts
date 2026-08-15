@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSessionText } from '../src/parser.ts'
+import { parseSessionText, hashHeader } from '../src/parser.ts'
 import { Projector } from '../src/projector.ts'
 import { buildSessionTree, branchSuccessor } from '../src/tree.ts'
 import { SearchProvider } from '../src/index/provider.ts'
@@ -28,7 +28,7 @@ test('parser/projector/tree/search smoke', () => {
   assert.equal(branchSuccessor('C', tree).entryId, 'D')
 
   const provider = new SearchProvider()
-  provider.indexSession(parsed, { filePath: '<mem>', size: SESSION.length, mtimeMs: 0, header: parsed.header, entryCount: 6, firstEntryId: 'A', lastEntryId: 'F', entryHashes: [] })
+  provider.indexSession(parsed, { filePath: '<mem>', size: SESSION.length, mtimeMs: 0, header: parsed.header, entryCount: 6, firstEntryId: 'A', lastEntryId: 'F', entryHashes: [], headerHash: hashHeader(parsed.header) })
   const hits = provider.searchEvents({ query: 'searchable' }, { authRoot: '/tmp/ws' })
   assert.equal(hits.length, 1)
   assert.equal(hits[0].entryId, 'A')

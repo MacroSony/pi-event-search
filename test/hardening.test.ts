@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { SearchProvider } from '../src/index/provider.ts'
+import { targetEntryId } from './helpers.ts'
 import { parseSessionText } from '../src/parser.ts'
 import { makeSourceInfo, TREE_SESSION } from './helpers.ts'
 import { makeTextPreview } from '../src/snippets.ts'
@@ -60,6 +61,6 @@ test('readEvent reports an unresolved fork on an alternate branch', () => {
   assert.equal(read.neighbors.fork?.atEntryId, 'C')
   assert.deepEqual(read.neighbors.fork?.candidateChildIds, ['D', 'G'])
   const trace = provider.traceEvent('s1', 'C', '/tmp/ws')
-  assert.deepEqual(trace.children.map((edge) => edge.to.entryId), ['D', 'G'])
+  assert.deepEqual(trace.children.map((edge) => targetEntryId(edge.to)), ['D', 'G'])
   provider.close()
 })

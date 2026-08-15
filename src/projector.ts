@@ -5,6 +5,7 @@ import type {
   Role,
   SemanticKind,
 } from './types.ts'
+import { recognizeFileEvidence } from './file-evidence.ts'
 
 export interface ProjectorOptions {
   /** Hard bound for any single indexed fragment text, in Unicode code points. */
@@ -178,6 +179,7 @@ export class Projector {
         const frag = this.fragment(entry, SEMANTIC_KINDS.TOOL_CALL, text, index)
         frag.toolName = name
         frag.toolCallId = toolCallId
+        this.applyFileEvidence(frag, name, rawCall['arguments'])
         fragments.push(frag)
         index += 1
       }
@@ -292,11 +294,19 @@ export class Projector {
         const fragment = this.fragment(entry, SEMANTIC_KINDS.TOOL_CALL, `${name}\n${args}`, toolIndex)
         fragment.toolName = name
         fragment.toolCallId = toolCallId
+        this.applyFileEvidence(fragment, name, block['arguments'])
         fragments.push(fragment)
         toolIndex += 1
       }
     }
     return fragments
+  }
+
+  private applyFileEvidence(fragment: Fragment, toolName: string, args: unknown): void {
+    const evidence = recognizeFileEvidence(toolName, args)
+    if (evidence === null) return
+    fragment.filePaths = evidence.paths
+    fragment.fileEvidenceType = evidence.type
   }
 
   private projectBashExecution(entry: RawEntry): Fragment[] {

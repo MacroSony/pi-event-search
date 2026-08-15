@@ -12,6 +12,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { SearchProvider } from './src/index/provider.ts'
 import { IndexMaintainer } from './src/index/maintainer.ts'
+import { defaultSessionDir } from './src/auth/discovery.ts'
 import { PiEventSearchService, type ServiceInvocation } from './src/api/service.ts'
 import { PiEventSearchError } from './src/errors.ts'
 import { parsedSessionFromSessionManager, sourceInfoForParsedSession } from './src/pi-adapter.ts'
@@ -35,8 +36,11 @@ export default function (pi: ExtensionAPI) {
     const sessionFile = ctx.sessionManager.getSessionFile?.()
 
     if (sessionDir !== undefined) {
+      const roots = new Set<string>()
+      roots.add(defaultSessionDir())
+      roots.add(sessionDir)
       if (maintainer === null) {
-        maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [sessionDir] } })
+        maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [...roots] } })
       }
       maintainer.refresh()
     } else {

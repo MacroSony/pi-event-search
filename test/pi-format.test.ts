@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseSessionText } from '../src/parser.ts'
+import { targetEntryId } from './helpers.ts'
 import { Projector } from '../src/projector.ts'
 import { SearchProvider } from '../src/index/provider.ts'
 import { makeSourceInfo } from './helpers.ts'
@@ -51,6 +52,23 @@ test('search over Pi sessions excludes thinking and custom state, includes custo
   provider.close()
 })
 
+test('file evidence derives from actual Pi message.content tool calls', () => {
+  const text = `{"type":"session","version":3,"id":"pi-file","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"read the file"}}
+{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"reading"},{"type":"toolCall","id":"call_read","name":"read","arguments":{"path":"/tmp/ws/foo.txt"}}]}}
+`
+  const parsed = parseSessionText(text)
+  const provider = new SearchProvider()
+  provider.indexSession(parsed, makeSourceInfo(parsed))
+  const traceA2 = provider.traceEvent('pi-file', 'a2', '/tmp/ws')
+  const fileEdge = traceA2.related.find((edge) => edge.type === 'file-read')
+  assert.ok(fileEdge)
+  assert.equal(fileEdge.recorded, false)
+  assert.equal(fileEdge.derived, true)
+  assert.equal('fileRef' in fileEdge.to, true)
+  provider.close()
+})
+
 test('traceEvent picks up Pi relationship vocabulary', () => {
   const parsed = parseSessionText(PI_SESSION)
   const provider = new SearchProvider()
@@ -59,12 +77,12 @@ test('traceEvent picks up Pi relationship vocabulary', () => {
   assert.ok(traceA3.related.find((edge) => edge.type === 'tool-result-for'))
 
   const traceA8 = provider.traceEvent(parsed.header.sessionId, 'a8', '/tmp/ws')
-  assert.equal(traceA8.related.find((edge) => edge.type === 'branch-summary-from')?.to.entryId, 'a2')
+  assert.equal(targetEntryId(traceA8.related.find((edge) => edge.type === 'branch-summary-from')?.to), 'a2')
 
   const traceA9 = provider.traceEvent(parsed.header.sessionId, 'a9', '/tmp/ws')
-  assert.equal(traceA9.related.find((edge) => edge.type === 'labels')?.to.entryId, 'a2')
+  assert.equal(targetEntryId(traceA9.related.find((edge) => edge.type === 'labels')?.to), 'a2')
 
   const traceA10 = provider.traceEvent(parsed.header.sessionId, 'a10', '/tmp/ws')
-  assert.equal(traceA10.related.find((edge) => edge.type === 'compacts')?.to.entryId, 'a3')
+  assert.equal(targetEntryId(traceA10.related.find((edge) => edge.type === 'compacts')?.to), 'a3')
   provider.close()
 })

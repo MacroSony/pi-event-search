@@ -105,6 +105,11 @@ export class IndexMaintainer {
         this.fileToSession.set(filePath, parsed.header.sessionId)
         return { filePath, action: 'appended', sessionId: parsed.header.sessionId }
       }
+      // Header/identity changes are file replacement: drop the old session
+      // before indexing the new identity so stale sessions do not linger.
+      if (previous.header.sessionId !== parsed.header.sessionId) {
+        this.provider.removeSession(previous.header.sessionId)
+      }
       this.provider.indexSession(parsed, current)
       this.fileToSession.set(filePath, parsed.header.sessionId)
       return { filePath, action: 'indexed', sessionId: parsed.header.sessionId }

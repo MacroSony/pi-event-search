@@ -26,6 +26,8 @@ import { isPathWithin, normalizePath } from '../auth/paths.ts'
 export interface ProviderOptions {
   searchLimit?: number
   readPreviewChars?: number
+  /** Aggregate character budget across all fragments returned by readEvent. */
+  readAggregateChars?: number
   traceMaxRelated?: number
   traceMaxChildren?: number
   projector?: Projector
@@ -50,6 +52,7 @@ export class SearchProvider {
   private readonly readProjector: Projector
   private readonly searchLimit: number
   private readonly readPreviewChars: number
+  private readonly readAggregateChars: number
   private readonly traceMaxRelated: number
   private readonly traceMaxChildren: number
   private db: DatabaseSync
@@ -61,6 +64,7 @@ export class SearchProvider {
     this.readProjector = new Projector({ maxIndexedTextChars: Number.MAX_SAFE_INTEGER })
     this.searchLimit = options.searchLimit ?? 20
     this.readPreviewChars = options.readPreviewChars ?? 2000
+    this.readAggregateChars = options.readAggregateChars ?? 6000
     this.traceMaxRelated = options.traceMaxRelated ?? 20
     this.traceMaxChildren = options.traceMaxChildren ?? 50
     this.db = this.createDatabase()
@@ -290,25 +294,35 @@ export class SearchProvider {
       }
     }
 
-    const matchRows = this.runFtsMatch(parsed.ftsQuery, Math.max(maxHits * 50, 500))
+    const sessionFilter = this.authorizedSessionFilter(request, authRoot)
+    if (sessionFilter.sessionIds.length === 0) return []
+
     const grouped = new Map<string, { fragment: Fragment; count: number; rank: number }>()
+    const sqlFilter = this.buildSqlFilter(request, sessionFilter.sessionIds)
+    const pageSize = 1000
+    let offset = 0
 
-    for (const row of matchRows) {
-      const fragment = this.fragmentsByRowid.get(row.rowid)
-      if (!fragment) continue
-      const session = this.sessions.get(fragment.sessionId)
-      if (!session) continue
-      if (!this.isSessionAuthorized(session, authRoot)) continue
-      if (!this.passesFilters(request, session, fragment)) continue
-      if (!this.passesCurrentSessionPolicy(request, context.execution, session, fragment)) continue
+    while (grouped.size < maxHits) {
+      const rows = this.runFtsPage(parsed.ftsQuery, sqlFilter, pageSize, offset)
+      if (rows.length === 0) break
+      for (const row of rows) {
+        const fragment = this.fragmentsByRowid.get(row.rowid)
+        if (!fragment) continue
+        const session = this.sessions.get(fragment.sessionId)
+        if (!session) continue
+        if (!this.passesRemainingFilters(request, session, fragment)) continue
+        if (!this.passesCurrentSessionPolicy(request, context.execution, session, fragment)) continue
 
-      const key = `${fragment.sessionId}\u0000${fragment.entryId}`
-      const existing = grouped.get(key)
-      if (existing) {
-        existing.count += 1
-        continue
+        const key = `${fragment.sessionId}\u0000${fragment.entryId}`
+        const existing = grouped.get(key)
+        if (existing) {
+          existing.count += 1
+          continue
+        }
+        grouped.set(key, { fragment, count: 1, rank: row.rank })
       }
-      grouped.set(key, { fragment, count: 1, rank: row.rank })
+      offset += pageSize
+      if (rows.length < pageSize) break
     }
 
     const hits: EventSearchHit[] = []
@@ -334,11 +348,71 @@ export class SearchProvider {
     return hits.slice(0, maxHits)
   }
 
-  private runFtsMatch(ftsQuery: string, cap: number): Array<{ rowid: number; rank: number }> {
+  /** Resolve session ids that pass authorization and the optional cwd filter. */
+  private authorizedSessionFilter(request: EventSearchRequest, authRoot: string): { sessionIds: string[] } {
+    const ids: string[] = []
+    for (const session of this.sessions.values()) {
+      if (!this.isSessionAuthorized(session, authRoot)) continue
+      if (request.sessionId !== undefined && session.header.sessionId !== request.sessionId) continue
+      if (request.cwd !== undefined && !isPathWithin(session.header.cwd, normalizePath(request.cwd))) continue
+      ids.push(session.header.sessionId)
+    }
+    ids.sort()
+    return { sessionIds: ids }
+  }
+
+  /** Push session, kind, tool-name and error filters into SQL. */
+  private buildSqlFilter(request: EventSearchRequest, sessionIds: string[]): { where: string; params: unknown[] } {
+    const conditions: string[] = []
+    const params: unknown[] = []
+    conditions.push(`f.session_id IN (${sessionIds.map(() => '?').join(', ')})`)
+    params.push(...sessionIds)
+    if (request.kinds !== undefined && request.kinds.length > 0) {
+      conditions.push(`f.semantic_kind IN (${request.kinds.map(() => '?').join(', ')})`)
+      params.push(...request.kinds)
+    }
+    if (request.toolNames !== undefined && request.toolNames.length > 0) {
+      conditions.push(`f.tool_name IN (${request.toolNames.map(() => '?').join(', ')})`)
+      params.push(...request.toolNames)
+    }
+    if (request.errorOnly === true) {
+      conditions.push('f.is_error = 1')
+    }
+    return { where: conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : '', params }
+  }
+
+  /** Filters that need tree metadata and therefore stay in JS. */
+  private passesRemainingFilters(request: EventSearchRequest, session: SessionRecord, fragment: Fragment): boolean {
+    const entry = session.tree.byId.get(fragment.entryId)
+    if (!entry) return false
+    if (request.entryTypes !== undefined && request.entryTypes.length > 0 && !request.entryTypes.includes(entry.entryType)) return false
+    if (request.roles !== undefined && request.roles.length > 0 && !request.roles.includes(entry.role)) return false
+    if (request.time !== undefined) {
+      if (request.time.from !== undefined && entry.timestamp < request.time.from) return false
+      if (request.time.to !== undefined && entry.timestamp > request.time.to) return false
+    }
+    if (request.branchStates !== undefined && request.branchStates.length > 0 && !request.branchStates.includes(entry.branchState)) return false
+    if (request.selectionStates !== undefined && request.selectionStates.length > 0 && !request.selectionStates.includes(entry.selectionState)) return false
+    return true
+  }
+
+  private runFtsPage(
+    ftsQuery: string,
+    sqlFilter: { where: string; params: unknown[] },
+    limit: number,
+    offset: number,
+  ): Array<{ rowid: number; rank: number }> {
+    const sql = `
+      SELECT fragments_fts.rowid AS rowid, bm25(fragments_fts) AS rank
+      FROM fragments_fts
+      JOIN fragments f ON f.rowid = fragments_fts.rowid
+      WHERE fragments_fts MATCH ?
+        ${sqlFilter.where}
+      ORDER BY rank, fragments_fts.rowid
+      LIMIT ? OFFSET ?
+    `
     try {
-      return this.db
-        .prepare(`SELECT rowid, bm25(fragments_fts) AS rank FROM fragments_fts WHERE fragments_fts MATCH ? ORDER BY rank LIMIT ?`)
-        .all(ftsQuery, cap) as Array<{ rowid: number; rank: number }>
+      return (this.db.prepare(sql).all as any)(ftsQuery, ...sqlFilter.params, limit, offset) as Array<{ rowid: number; rank: number }>
     } catch (err) {
       const message = (err as Error).message
       if (message.includes('fts5') || message.includes('syntax error')) {
@@ -350,26 +424,6 @@ export class SearchProvider {
 
   private isSessionAuthorized(session: SessionRecord, authRoot: string): boolean {
     return isPathWithin(session.header.cwd, authRoot)
-  }
-
-  private passesFilters(request: EventSearchRequest, session: SessionRecord, fragment: Fragment): boolean {
-    const entry = session.tree.byId.get(fragment.entryId)
-    if (!entry) return false
-
-    if (request.sessionId !== undefined && fragment.sessionId !== request.sessionId) return false
-    if (request.cwd !== undefined && !isPathWithin(session.header.cwd, normalizePath(request.cwd))) return false
-    if (request.kinds !== undefined && request.kinds.length > 0 && !request.kinds.includes(fragment.semanticKind)) return false
-    if (request.entryTypes !== undefined && request.entryTypes.length > 0 && !request.entryTypes.includes(entry.entryType)) return false
-    if (request.roles !== undefined && request.roles.length > 0 && !request.roles.includes(entry.role)) return false
-    if (request.toolNames !== undefined && request.toolNames.length > 0 && !(fragment.toolName !== undefined && request.toolNames.includes(fragment.toolName))) return false
-    if (request.errorOnly === true && fragment.isError !== true) return false
-    if (request.time !== undefined) {
-      if (request.time.from !== undefined && entry.timestamp < request.time.from) return false
-      if (request.time.to !== undefined && entry.timestamp > request.time.to) return false
-    }
-    if (request.branchStates !== undefined && request.branchStates.length > 0 && !request.branchStates.includes(entry.branchState)) return false
-    if (request.selectionStates !== undefined && request.selectionStates.length > 0 && !request.selectionStates.includes(entry.selectionState)) return false
-    return true
   }
 
   private passesCurrentSessionPolicy(
@@ -386,7 +440,7 @@ export class SearchProvider {
     }
     const entry = session.tree.byId.get(fragment.entryId)
     if (!entry) return false
-    const cutoffSeq = this.resolveCutoffSeq(session, execution)
+    const cutoffSeq = this.resolveCutoffSeq(session, execution!)
     return entry.appendSeq < cutoffSeq
   }
 
@@ -422,16 +476,21 @@ export class SearchProvider {
     const afterLimit = options.after ?? 1
 
     const neighbors = this.readNeighbors(sessionId, entryId, order, beforeLimit, afterLimit, authRoot)
-    const fragments = readProjection.fragments.map((fragment) => ({
+    const projectedFragments = readProjection.fragments
+    const perFragmentBudget = projectedFragments.length === 0
+      ? 0
+      : Math.max(1, Math.floor(this.readAggregateChars / projectedFragments.length))
+    const fragments = projectedFragments.map((fragment) => ({
       semanticKind: fragment.semanticKind,
-      text: fragment.text,
       toolName: fragment.toolName,
       isError: fragment.isError,
       customType: fragment.customType,
       preview: makeTextPreview(fragment.text, {
-        maxChars: this.readPreviewChars,
+        maxChars: Math.min(this.readPreviewChars, perFragmentBudget),
         offset: options.offset,
-        windowChars: options.windowChars,
+        windowChars: options.windowChars === undefined
+          ? perFragmentBudget
+          : Math.min(options.windowChars, perFragmentBudget),
       }),
     }))
 
@@ -618,12 +677,12 @@ function recordToTraceEdge(session: SessionRecord, record: RelationshipRecord): 
     record.targetSessionId !== null && record.targetEntryId !== null
       ? session.tree.byId.get(record.targetEntryId)
       : undefined
-  const target =
+  const target: { sessionId: string; entryId: string } | { fileRef: string } =
     record.targetRef !== null
       ? { fileRef: record.targetRef }
       : record.targetSessionId !== null && record.targetEntryId !== null
         ? { sessionId: record.targetSessionId, entryId: record.targetEntryId }
-        : { sessionId: record.targetSessionId ?? session.header.sessionId }
+        : { sessionId: record.targetSessionId ?? session.header.sessionId, entryId: record.targetEntryId ?? '' }
 
   return {
     type: record.type,

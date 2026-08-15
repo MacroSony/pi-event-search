@@ -40,6 +40,14 @@ test('discoverSessionFiles finds jsonl files recursively and sorted', () => {
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('default session dir uses Pi agent sessions root', () => {
+  const previous = process.env['PI_SESSION_DIR']
+  delete process.env['PI_SESSION_DIR']
+  assert.equal(defaultSessionDir(), path.join(os.homedir(), '.pi', 'agent', 'sessions'))
+  if (previous === undefined) delete process.env['PI_SESSION_DIR']
+  else process.env['PI_SESSION_DIR'] = previous
+})
+
 test('default session dir honors PI_SESSION_DIR', () => {
   const previous = process.env['PI_SESSION_DIR']
   process.env['PI_SESSION_DIR'] = '/tmp/pes-sessions'
