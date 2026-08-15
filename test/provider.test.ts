@@ -65,6 +65,17 @@ test('CJK substring search matches words inside longer character runs', () => {
   provider.close()
 })
 
+test('unquoted CJK terms use AND-of-characters for better recall', () => {
+  const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"我修改了文件内容"}
+{"id":"B","parentId":"A","timestamp":"2026-01-01T00:00:02.000Z","type":"assistant","text":"修改文件成功"}
+`
+  const provider = providerWith(text)
+  assert.deepEqual(provider.searchEvents({ query: '修改文件' }, { authRoot: '/tmp/ws' }).map((h) => h.entryId).sort(), ['A', 'B'])
+  assert.deepEqual(provider.searchEvents({ query: '"修改文件"' }, { authRoot: '/tmp/ws' }).map((h) => h.entryId), ['B'])
+  provider.close()
+})
+
 test('metadata filters apply to structured fields', () => {
   const provider = providerWith(TREE_SESSION, TOOL_SESSION)
   assert.deepEqual(

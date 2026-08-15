@@ -24,11 +24,14 @@ export interface ToolDefinition {
 export const eventSearchToolDefinition: ToolDefinition = {
   name: 'event_search',
   description:
-    'Read-only search over persisted Pi session events as typed semantic fragments. Returns bounded event hits with (sessionId, entryId) provenance.',
+    'Read-only search over persisted Pi session events. Use 1-3 short concrete terms; terms are ANDed, so too many terms or filters usually return no hits. Start broad, then narrow.',
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Plain terms and quoted phrases; separate terms use implicit AND.' },
+      query: {
+        type: 'string',
+        description: 'Short concrete terms or quoted phrases. Terms are ANDed. Good: "edit", "write_file". Bad: "修改 edit write 文件 CJK 中文 分词".',
+      },
       sessionId: { type: 'string', description: 'Optional explicit session to search. Use "current" to target the invoking session (still honors the invocation cutoff).' },
       cwd: { type: 'string', description: 'Optional workspace directory filter.' },
       kinds: { type: 'array', items: { type: 'string' } },

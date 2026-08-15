@@ -69,10 +69,20 @@ export function parseQuery(input: string): ParsedQuery {
   // CJK terms are segmented into per-character tokens so that substring
   // queries match inside longer CJK runs. `terms`/`phrases` stay whole for
   // snippet highlighting against the original fragment text.
+  //
+  // Unquoted terms become an AND of their segmented tokens, so a CJK term
+  // like 修改文件 matches a document containing those characters even with
+  // intervening particles (我修改了文件). Quoted phrases keep adjacency.
   const ftsParts: string[] = []
-  for (const term of terms) ftsParts.push(quoteFtsString(segmentForIndex(term)))
+  for (const term of terms) ftsParts.push(quoteEachSegment(term))
   for (const phrase of phrases) ftsParts.push(quoteFtsString(segmentForIndex(phrase)))
   return { terms, phrases, ftsQuery: ftsParts.join(' ') }
+}
+
+function quoteEachSegment(value: string): string {
+  const segmented = segmentForIndex(value)
+  if (segmented.length === 0) return quoteFtsString(value)
+  return segmented.split(/\s+/).map((token) => quoteFtsString(token)).join(' ')
 }
 
 function quoteFtsString(value: string): string {

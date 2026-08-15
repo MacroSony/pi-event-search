@@ -100,9 +100,21 @@ export default function (pi: ExtensionAPI) {
     name: 'event_search',
     label: 'Event Search',
     description:
-      'Read-only search over persisted Pi session events as typed semantic fragments. Returns bounded event hits with (sessionId, entryId) provenance.',
+      'Read-only search over persisted Pi session events. Use 1-3 short concrete terms; terms are ANDed, so too many terms or filters usually return no hits. Start broad, then narrow.',
+    promptSnippet: 'Search persisted Pi session events by short keyword(s).',
+    promptGuidelines: [
+      'Prefer one concrete keyword or short quoted phrase for event_search: e.g. "edit", "write_file", "npm install".',
+      'Do not combine multiple concepts in one event_search query; each extra term makes the AND search stricter and often returns no hits.',
+      'Do not mix synonyms or multiple languages in one query (e.g. avoid "修改 edit write 文件").',
+      'Add structured filters (kinds, roles, toolNames, entryTypes) only when a previous hit told you the exact value.',
+      'If event_search returns no hits, retry with fewer, simpler terms before concluding the event does not exist.',
+      'Use event_search to locate candidate (sessionId, entryId); then use event_read/event_trace for context and git diff to verify actual file changes.',
+    ],
     parameters: Type.Object({
-      query: Type.String({ minLength: 1, description: 'Plain terms and quoted phrases; separate terms use implicit AND.' }),
+      query: Type.String({
+        minLength: 1,
+        description: 'Short concrete terms or quoted phrases. Terms are ANDed. Good: "edit", "write_file". Bad: "修改 edit write 文件 CJK 中文 分词".',
+      }),
       sessionId: Type.Optional(Type.String({ description: 'Optional explicit session to search. Use "current" to target the invoking session (still honors the invocation cutoff).' })),
       cwd: Type.Optional(Type.String({ description: 'Optional workspace directory filter.' })),
       kinds: Type.Optional(Type.Array(Type.String())),
@@ -122,8 +134,11 @@ export default function (pi: ExtensionAPI) {
       syncCurrentSession(ctx)
       try {
         const hits = service.searchEvents(params as any, invocationFrom(ctx))
+        const text = hits.length === 0
+          ? '0 hits. Terms are ANDed; too many terms or restrictive filters often cause this. Retry with a single concrete keyword like "edit" or "write_file", or remove filters.'
+          : JSON.stringify(hits, null, 2)
         return {
-          content: [{ type: 'text', text: JSON.stringify(hits, null, 2) }],
+          content: [{ type: 'text', text }],
           details: {},
         }
       } catch (err) {
