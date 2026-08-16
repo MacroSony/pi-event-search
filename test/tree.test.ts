@@ -27,7 +27,13 @@ test('selected path and branch states follow the materialized leaf', () => {
 
 test('branch successor follows selected path for selected entries', () => {
   const { tree } = buildTree(TREE_SESSION)
-  assert.equal(branchSuccessor('B', tree).entryId, 'E')
+  const successor = branchSuccessor('B', tree)
+  assert.equal(successor.entryId, 'E')
+  assert.deepEqual(successor.fork, {
+    atEntryId: 'B',
+    candidateChildIds: ['C', 'E'],
+    chosenChildId: 'E',
+  })
   assert.equal(branchSuccessor('F', tree).entryId, null)
 })
 
@@ -63,7 +69,13 @@ test('branch ancestors are returned in conversational order', () => {
 
 test('branch descendants follow the selected path', () => {
   const { tree } = buildTree(TREE_SESSION)
-  assert.deepEqual(branchDescendants('B', tree, 10).entries.map((entry) => entry.id), ['E', 'F'])
+  const descendants = branchDescendants('B', tree, 10)
+  assert.deepEqual(descendants.entries.map((entry) => entry.id), ['E', 'F'])
+  assert.deepEqual(descendants.forks, [{
+    atEntryId: 'B',
+    candidateChildIds: ['C', 'E'],
+    chosenChildId: 'E',
+  }])
 })
 
 test('append neighbors honor zero counts', () => {

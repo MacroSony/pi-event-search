@@ -30,6 +30,7 @@ A search result should retain what produced it: the session, entry, fragment kin
 - **Every hit has provenance.** Search results lead back to a stable `(sessionId, entryId)` source.
 - **Events remain typed.** User text, assistant text, tool calls, tool results, compactions, and branch summaries are not flattened into an indistinguishable transcript.
 - **Pi's tree matters.** Parentage, alternate branches, compaction, and the selected materialized branch remain queryable facts.
+- **Session forks remain connected.** Pi `--fork` copies are linked back to their authorized parent session with full event identities.
 - **Retrieval is bounded and explicit.** Search returns small snippets; exact reads report any presentation truncation.
 - **Model access is scoped.** A Pi tool must not silently expose sessions from unrelated workspaces.
 - **Private reasoning is excluded from the MVP.** Raw sessions remain untouched, but thinking content is neither indexed nor returned.
@@ -39,6 +40,7 @@ A search result should retain what produced it: the session, entry, fragment kin
 
 - [Core concepts](docs/concepts.md)
 - [Tool design](docs/tool-design.md)
+- [Persistent index lifecycle](docs/index-lifecycle.md)
 
 ## Implementation status
 
@@ -61,6 +63,23 @@ npm run check
 ```
 
 `npm run check` runs `tsc --noEmit` plus the full `node --test` suite.
+
+### Startup scope and large histories
+
+The extension resolves the current Git worktree as its default workspace scope.
+Outside Git it falls back to the current working directory. Historical startup
+indexing is capped at 32 MiB and 100 recent session files so a broad directory
+cannot freeze Pi while an in-memory index is built. The tool reports partial
+coverage whenever that cap is active; the current session is synchronized
+separately.
+
+The startup policy can be configured with environment variables:
+
+- `PI_EVENT_SEARCH_WORKSPACE_ROOT` — explicit authorization and discovery root.
+- `PI_EVENT_SEARCH_STARTUP_BUDGET_MB` — source-byte budget; use `unlimited` to disable.
+- `PI_EVENT_SEARCH_STARTUP_FILE_LIMIT` — session-count budget; use `unlimited` to disable.
+
+Pi's own `PI_CODING_AGENT_SESSION_DIR` setting is honored for session discovery.
 
 ## Initial boundary
 

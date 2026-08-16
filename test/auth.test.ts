@@ -41,19 +41,23 @@ test('discoverSessionFiles finds jsonl files recursively and sorted', () => {
 })
 
 test('default session dir uses Pi agent sessions root', () => {
-  const previous = process.env['PI_SESSION_DIR']
+  const previousPi = process.env['PI_CODING_AGENT_SESSION_DIR']
+  const previousLegacy = process.env['PI_SESSION_DIR']
+  delete process.env['PI_CODING_AGENT_SESSION_DIR']
   delete process.env['PI_SESSION_DIR']
   assert.equal(defaultSessionDir(), path.join(os.homedir(), '.pi', 'agent', 'sessions'))
-  if (previous === undefined) delete process.env['PI_SESSION_DIR']
-  else process.env['PI_SESSION_DIR'] = previous
+  if (previousPi === undefined) delete process.env['PI_CODING_AGENT_SESSION_DIR']
+  else process.env['PI_CODING_AGENT_SESSION_DIR'] = previousPi
+  if (previousLegacy === undefined) delete process.env['PI_SESSION_DIR']
+  else process.env['PI_SESSION_DIR'] = previousLegacy
 })
 
-test('default session dir honors PI_SESSION_DIR', () => {
-  const previous = process.env['PI_SESSION_DIR']
-  process.env['PI_SESSION_DIR'] = '/tmp/pes-sessions'
+test('default session dir honors Pi\'s official environment variable', () => {
+  const previous = process.env['PI_CODING_AGENT_SESSION_DIR']
+  process.env['PI_CODING_AGENT_SESSION_DIR'] = '/tmp/pes-sessions'
   assert.equal(defaultSessionDir(), '/tmp/pes-sessions')
-  if (previous === undefined) delete process.env['PI_SESSION_DIR']
-  else process.env['PI_SESSION_DIR'] = previous
+  if (previous === undefined) delete process.env['PI_CODING_AGENT_SESSION_DIR']
+  else process.env['PI_CODING_AGENT_SESSION_DIR'] = previous
 })
 
 test('authorizer uses explicit root over git and cwd', () => {

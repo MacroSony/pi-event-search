@@ -2,6 +2,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { PiEventSearchError, notFoundError } from '../errors.ts'
 import { Projector } from '../projector.ts'
 import type {
+  BranchForkReceipt,
+  EntryIdentity,
   EventSearchHit,
   EventSearchRequest,
   EventTrace,
@@ -17,18 +19,35 @@ import type {
   TraceEdge,
   TraceNode,
 } from '../types.ts'
-import { buildSessionTree, branchAncestors, branchDescendants, appendNeighbors } from '../tree.ts'
+import {
+  appendNeighbors,
+  branchAncestors,
+  branchDescendants,
+  branchForkForEdge,
+  buildSessionTree,
+  type BranchFork,
+} from '../tree.ts'
 import { extractRelationships, extractSessionParentEdge, type RelationshipRecord } from '../relationships.ts'
 import { buildSnippet, makeTextPreview } from '../snippets.ts'
 import { parseQuery } from '../query.ts'
 import { segmentForIndex } from '../cjk.ts'
 import { isPathWithin, normalizePath } from '../auth/paths.ts'
 
+const SELF_RETRIEVAL_TOOL_NAMES = ['event_search', 'event_read', 'event_trace'] as const
+
+interface CrossSessionForkGroup {
+  at: EntryIdentity
+  participantSessionIds: Set<string>
+  candidates: EntryIdentity[]
+}
+
 export interface ProviderOptions {
   searchLimit?: number
   readPreviewChars?: number
   /** Aggregate character budget across all fragments returned by readEvent. */
   readAggregateChars?: number
+  /** Maximum fragments returned by an unfiltered readEvent call. */
+  readMaxFragments?: number
   traceMaxRelated?: number
   traceMaxChildren?: number
   projector?: Projector
@@ -54,6 +73,7 @@ export class SearchProvider {
   private readonly searchLimit: number
   private readonly readPreviewChars: number
   private readonly readAggregateChars: number
+  private readonly readMaxFragments: number
   private readonly traceMaxRelated: number
   private readonly traceMaxChildren: number
   private db: DatabaseSync
@@ -66,6 +86,7 @@ export class SearchProvider {
     this.searchLimit = options.searchLimit ?? 20
     this.readPreviewChars = options.readPreviewChars ?? 2000
     this.readAggregateChars = options.readAggregateChars ?? 6000
+    this.readMaxFragments = options.readMaxFragments ?? 20
     this.traceMaxRelated = options.traceMaxRelated ?? 20
     this.traceMaxChildren = options.traceMaxChildren ?? 50
     this.db = this.createDatabase()
@@ -340,6 +361,7 @@ export class SearchProvider {
         cwd: session.header.cwd,
         entryId: fragment.entryId,
         entryType: entry.entryType,
+        matchingFragmentId: fragment.fragmentId,
         semanticKind: fragment.semanticKind,
         timestamp: entry.timestamp,
         branchState: entry.branchState,
@@ -377,6 +399,13 @@ export class SearchProvider {
     if (request.toolNames !== undefined && request.toolNames.length > 0) {
       conditions.push(`f.tool_name IN (${request.toolNames.map(() => '?').join(', ')})`)
       params.push(...request.toolNames)
+    } else {
+      // Retrieval calls are retained as evidence, but suppress them from
+      // ordinary searches so search/read responses do not recursively become
+      // the strongest hits for their own query terms. An explicit toolNames
+      // filter opts back into this audit traffic.
+      conditions.push(`COALESCE(f.tool_name, '') NOT IN (${SELF_RETRIEVAL_TOOL_NAMES.map(() => '?').join(', ')})`)
+      params.push(...SELF_RETRIEVAL_TOOL_NAMES)
     }
     if (request.errorOnly === true) {
       conditions.push('f.is_error = 1')
@@ -443,8 +472,7 @@ export class SearchProvider {
     }
     const entry = session.tree.byId.get(fragment.entryId)
     if (!entry) return false
-    const cutoffSeq = this.resolveCutoffSeq(session, execution!)
-    return entry.appendSeq < cutoffSeq
+    return this.isEntryBeforeCutoff(session, entry, execution!)
   }
 
   private resolveCutoffSeq(session: SessionRecord, execution: ExecutionContext): number {
@@ -459,18 +487,57 @@ export class SearchProvider {
     }
     throw new PiEventSearchError(
       'INVALID_ARGUMENT',
-      'Current session search requires an invocation cutoff.',
+      'Current session retrieval requires an invocation cutoff.',
     )
+  }
+
+  private cutoffSeqForSession(
+    session: SessionRecord,
+    execution: ExecutionContext | undefined,
+  ): number | undefined {
+    if (execution?.currentSessionId !== session.header.sessionId) return undefined
+    return this.resolveCutoffSeq(session, execution)
+  }
+
+  private isEntryBeforeCutoff(
+    session: SessionRecord,
+    entry: import('../types.ts').EntryRecord,
+    execution: ExecutionContext | undefined,
+  ): boolean {
+    const cutoffSeq = this.cutoffSeqForSession(session, execution)
+    return cutoffSeq === undefined || entry.appendSeq < cutoffSeq
+  }
+
+  private requireEntryBeforeCutoff(
+    session: SessionRecord,
+    entry: import('../types.ts').EntryRecord | undefined,
+    execution: ExecutionContext | undefined,
+    identity: string,
+  ): import('../types.ts').EntryRecord {
+    if (!entry || !this.isEntryBeforeCutoff(session, entry, execution)) {
+      throw notFoundError(identity)
+    }
+    return entry
   }
 
   // -------------------------------------------------------------------------
   // Read
   // -------------------------------------------------------------------------
 
-  readEvent(sessionId: string, entryId: string, options: ReadEventOptions, authRoot: string): ReadEventResult {
+  readEvent(
+    sessionId: string,
+    entryId: string,
+    options: ReadEventOptions,
+    authRoot: string,
+    execution?: ExecutionContext,
+  ): ReadEventResult {
     const session = this.requireAuthorizedSession(sessionId, authRoot)
-    const entry = session.tree.byId.get(entryId)
-    if (!entry) throw notFoundError(`entry ${sessionId}/${entryId}`)
+    const entry = this.requireEntryBeforeCutoff(
+      session,
+      session.tree.byId.get(entryId),
+      execution,
+      `entry ${sessionId}/${entryId}`,
+    )
 
     const rawEntry = entry as unknown as RawEntry
     const readProjection = this.readProjector.project(sessionId, rawEntry)
@@ -478,12 +545,23 @@ export class SearchProvider {
     const beforeLimit = options.before ?? 1
     const afterLimit = options.after ?? 1
 
-    const neighbors = this.readNeighbors(sessionId, entryId, order, beforeLimit, afterLimit, authRoot)
-    const projectedFragments = readProjection.fragments
+    const neighbors = this.readNeighbors(sessionId, entryId, order, beforeLimit, afterLimit, authRoot, execution)
+    const allProjectedFragments = readProjection.fragments
+    let projectedFragments: Fragment[]
+    if (options.fragmentId !== undefined) {
+      const selectedFragment = allProjectedFragments.find((fragment) => fragment.fragmentId === options.fragmentId)
+      if (selectedFragment === undefined) {
+        throw notFoundError(`fragment ${sessionId}/${entryId}/${options.fragmentId}`)
+      }
+      projectedFragments = [selectedFragment]
+    } else {
+      projectedFragments = allProjectedFragments.slice(0, this.readMaxFragments)
+    }
     const perFragmentBudget = projectedFragments.length === 0
       ? 0
       : Math.max(1, Math.floor(this.readAggregateChars / projectedFragments.length))
     const fragments = projectedFragments.map((fragment) => ({
+      fragmentId: fragment.fragmentId,
       semanticKind: fragment.semanticKind,
       toolName: fragment.toolName,
       isError: fragment.isError,
@@ -508,6 +586,12 @@ export class SearchProvider {
       role: entry.role,
       contextRole: entry.contextRole,
       fragments,
+      fragmentCoverage: {
+        total: allProjectedFragments.length,
+        returned: projectedFragments.length,
+        omitted: allProjectedFragments.length - projectedFragments.length,
+        truncated: options.fragmentId === undefined && allProjectedFragments.length > this.readMaxFragments,
+      },
       neighbors,
     }
   }
@@ -519,27 +603,224 @@ export class SearchProvider {
     beforeLimit: number,
     afterLimit: number,
     authRoot: string,
+    execution?: ExecutionContext,
   ): ReadEventResult['neighbors'] {
     const session = this.requireAuthorizedSession(sessionId, authRoot)
     const tree = session.tree
+    const eligible = (entry: import('../types.ts').EntryRecord) =>
+      this.isEntryBeforeCutoff(session, entry, execution)
     if (order === 'append') {
       const { before, after } = appendNeighbors(entryId, tree, beforeLimit, afterLimit)
       return {
         order,
-        before: before.map((entry) => this.toNeighbor(session, entry)),
-        after: after.map((entry) => this.toNeighbor(session, entry)),
+        before: before.filter(eligible).map((entry) => this.toNeighbor(session, entry)),
+        after: after.filter(eligible).map((entry) => this.toNeighbor(session, entry)),
+        forks: [],
       }
     }
     const ancestors = branchAncestors(entryId, tree, beforeLimit)
     const descendants = branchDescendants(entryId, tree, afterLimit)
+    const target = tree.byId.get(entryId)
+    const pathThroughTarget = target === undefined ? ancestors : [...ancestors, target]
+    const ancestorForks: BranchFork[] = []
+    for (let index = 0; index + 1 < pathThroughTarget.length; index += 1) {
+      const fork = branchForkForEdge(pathThroughTarget[index].id, pathThroughTarget[index + 1].id, tree)
+      if (fork !== undefined) ancestorForks.push(fork)
+    }
+    const localForks = [...ancestorForks, ...descendants.forks]
+      .map((fork) => this.visibleFork(fork, session, eligible))
+      .filter((fork): fork is NonNullable<typeof fork> => fork !== undefined)
+    const visibleAncestors = ancestors.filter(eligible)
+    const visibleDescendants = descendants.entries.filter(eligible)
+    const visiblePath = target === undefined
+      ? visibleAncestors
+      : [...visibleAncestors, target, ...visibleDescendants]
+    const crossSessionForks = this.crossSessionForksForPath(
+      session,
+      visiblePath,
+      authRoot,
+      execution,
+    )
+    const crossSessionAnchorIds = new Set(crossSessionForks.map((fork) => fork.at.entryId))
     return {
       order,
-      before: ancestors.map((entry) => this.toNeighbor(session, entry)),
-      after: descendants.entries.map((entry) => this.toNeighbor(session, entry)),
-      fork: descendants.fork
-        ? { atEntryId: descendants.fork.atEntryId, candidateChildIds: descendants.fork.candidateChildIds }
-        : undefined,
+      before: visibleAncestors.map((entry) => this.toNeighbor(session, entry)),
+      after: visibleDescendants.map((entry) => this.toNeighbor(session, entry)),
+      // A cross-session receipt contains both the parent-local and copied
+      // continuations, so it supersedes a narrower local receipt at the same
+      // copied anchor.
+      forks: [
+        ...localForks.filter((fork) => !crossSessionAnchorIds.has(fork.at.entryId)),
+        ...crossSessionForks,
+      ],
     }
+  }
+
+  private visibleFork(
+    fork: BranchFork,
+    session: SessionRecord,
+    eligible: (entry: import('../types.ts').EntryRecord) => boolean,
+  ): ReadEventResult['neighbors']['forks'][number] | undefined {
+    const tree = session.tree
+    const candidateChildIds = fork.candidateChildIds.filter((candidateId) => {
+      const candidate = tree.byId.get(candidateId)
+      return candidate !== undefined && eligible(candidate)
+    })
+    if (candidateChildIds.length <= 1) return undefined
+    const chosenChildId = fork.chosenChildId !== undefined && candidateChildIds.includes(fork.chosenChildId)
+      ? fork.chosenChildId
+      : undefined
+    return {
+      kind: 'in-session',
+      at: { sessionId: session.header.sessionId, entryId: fork.atEntryId },
+      candidates: candidateChildIds.map((candidateId) => ({
+        sessionId: session.header.sessionId,
+        entryId: candidateId,
+      })),
+      chosen: chosenChildId === undefined
+        ? undefined
+        : { sessionId: session.header.sessionId, entryId: chosenChildId },
+    }
+  }
+
+  private crossSessionForksForPath(
+    session: SessionRecord,
+    path: import('../types.ts').EntryRecord[],
+    authRoot: string,
+    execution?: ExecutionContext,
+  ): BranchForkReceipt[] {
+    if (path.length < 2) return []
+    const groups = this.crossSessionForkGroups(authRoot, execution)
+    const receipts: BranchForkReceipt[] = []
+    const seen = new Set<string>()
+    for (let index = 0; index + 1 < path.length; index += 1) {
+      const from = path[index]
+      const to = path[index + 1]
+      for (const group of groups) {
+        if (group.at.entryId !== from.id) continue
+        if (!group.participantSessionIds.has(session.header.sessionId)) continue
+        const chosen = group.candidates.find((candidate) =>
+          candidate.sessionId === session.header.sessionId && candidate.entryId === to.id,
+        )
+        if (chosen === undefined) continue
+        const key = identityKey(group.at)
+        if (seen.has(key)) continue
+        seen.add(key)
+        receipts.push({
+          kind: 'session-fork',
+          at: group.at,
+          candidates: group.candidates,
+          chosen,
+        })
+      }
+    }
+    return receipts
+  }
+
+  private crossSessionForkGroups(
+    authRoot: string,
+    execution?: ExecutionContext,
+  ): CrossSessionForkGroup[] {
+    const normalizedRoot = normalizePath(authRoot)
+    const groups = new Map<string, CrossSessionForkGroup>()
+
+    for (const child of this.sessions.values()) {
+      if (!this.isSessionAuthorized(child, normalizedRoot)) continue
+      const parent = this.resolveParentSession(child, normalizedRoot)
+      if (parent === undefined) continue
+      const continuation = this.firstChildSessionContinuation(parent, child)
+      if (continuation === undefined) continue
+      const anchorId = child.tree.byId.get(continuation.entryId)?.parentId
+      if (anchorId === null || anchorId === undefined) continue
+
+      const at = { sessionId: parent.header.sessionId, entryId: anchorId }
+      const key = identityKey(at)
+      let group = groups.get(key)
+      if (group === undefined) {
+        group = {
+          at,
+          participantSessionIds: new Set([parent.header.sessionId]),
+          candidates: [],
+        }
+        for (const candidateId of parent.tree.childrenByParent.get(anchorId) ?? []) {
+          group.candidates.push({ sessionId: parent.header.sessionId, entryId: candidateId })
+        }
+        groups.set(key, group)
+      }
+      group.participantSessionIds.add(child.header.sessionId)
+      group.candidates.push(continuation)
+    }
+
+    const result: CrossSessionForkGroup[] = []
+    for (const group of groups.values()) {
+      const uniqueCandidates = new Map<string, EntryIdentity>()
+      for (const candidate of group.candidates) {
+        const candidateSession = this.sessions.get(candidate.sessionId)
+        const candidateEntry = candidateSession?.tree.byId.get(candidate.entryId)
+        if (
+          candidateSession === undefined ||
+          candidateEntry === undefined ||
+          !this.isSessionAuthorized(candidateSession, normalizedRoot) ||
+          !this.isEntryBeforeCutoff(candidateSession, candidateEntry, execution)
+        ) {
+          continue
+        }
+        uniqueCandidates.set(identityKey(candidate), candidate)
+      }
+      const candidates = [...uniqueCandidates.values()].sort((left, right) => {
+        if (left.sessionId === group.at.sessionId && right.sessionId !== group.at.sessionId) return -1
+        if (right.sessionId === group.at.sessionId && left.sessionId !== group.at.sessionId) return 1
+        return left.sessionId.localeCompare(right.sessionId) || left.entryId.localeCompare(right.entryId)
+      })
+      if (candidates.length <= 1) continue
+      result.push({ ...group, candidates })
+    }
+    result.sort((left, right) => identityKey(left.at).localeCompare(identityKey(right.at)))
+    return result
+  }
+
+  private resolveParentSession(child: SessionRecord, authRoot: string): SessionRecord | undefined {
+    const parentRef = child.header.parentSession
+    if (typeof parentRef !== 'string' || parentRef.length === 0) return undefined
+
+    const direct = this.sessions.get(parentRef)
+    if (direct !== undefined && this.isSessionAuthorized(direct, authRoot)) return direct
+
+    const normalizedRef = normalizePath(parentRef)
+    for (const candidate of this.sessions.values()) {
+      if (!this.isSessionAuthorized(candidate, authRoot)) continue
+      if (normalizePath(candidate.sourceInfo.filePath) === normalizedRef) return candidate
+    }
+    return undefined
+  }
+
+  private firstChildSessionContinuation(
+    parent: SessionRecord,
+    child: SessionRecord,
+  ): EntryIdentity | undefined {
+    let sawSharedEntry = false
+    for (const entry of child.tree.entries) {
+      const parentEntry = parent.tree.byId.get(entry.id)
+      if (parentEntry !== undefined) {
+        const parentHash = parent.sourceInfo.entryHashes[parentEntry.appendSeq]
+        const childHash = child.sourceInfo.entryHashes[entry.appendSeq]
+        if (
+          parentHash !== undefined &&
+          childHash !== undefined &&
+          isDurableEntryHash(parentHash) &&
+          isDurableEntryHash(childHash) &&
+          parentHash !== childHash
+        ) {
+          return undefined
+        }
+        sawSharedEntry = true
+        continue
+      }
+      if (!sawSharedEntry || entry.parentId === null) return undefined
+      if (!parent.tree.byId.has(entry.parentId) || !child.tree.byId.has(entry.parentId)) return undefined
+      return { sessionId: child.header.sessionId, entryId: entry.id }
+    }
+    return undefined
   }
 
   private toNeighbor(session: SessionRecord, entry: import('../types.ts').EntryRecord): ReadEventResult['neighbors']['before'][number] {
@@ -564,11 +845,27 @@ export class SearchProvider {
   // Trace
   // -------------------------------------------------------------------------
 
-  traceEvent(sessionId: string, entryId: string, authRoot: string): EventTrace {
+  traceEvent(
+    sessionId: string,
+    entryId: string,
+    authRoot: string,
+    execution?: ExecutionContext,
+  ): EventTrace {
     const session = this.requireAuthorizedSession(sessionId, authRoot)
     const tree = session.tree
-    const entry = tree.byId.get(entryId)
-    if (!entry) throw notFoundError(`entry ${sessionId}/${entryId}`)
+    const entry = this.requireEntryBeforeCutoff(
+      session,
+      tree.byId.get(entryId),
+      execution,
+      `entry ${sessionId}/${entryId}`,
+    )
+    const cutoffSeq = this.cutoffSeqForSession(session, execution)
+    const eligibleEntryId = (candidateId: string | null): boolean => {
+      if (cutoffSeq === undefined) return true
+      if (candidateId === null) return true
+      const candidate = tree.byId.get(candidateId)
+      return candidate !== undefined && candidate.appendSeq < cutoffSeq
+    }
 
     const target: TraceNode = {
       sessionId,
@@ -580,21 +877,26 @@ export class SearchProvider {
       preview: this.previewEntry(session, entry),
     }
 
-    const parent = entry.parentId !== null ? this.recordedEdge(session, entry, entry.parentId, 'parent') : undefined
-    const allChildren = (tree.childrenByParent.get(entryId) ?? []).map((childId) =>
-      this.recordedEdge(session, entry, childId, 'child'),
-    )
+    const parent = entry.parentId !== null && eligibleEntryId(entry.parentId)
+      ? this.recordedEdge(session, entry, entry.parentId, 'parent')
+      : undefined
+    const allChildren = (tree.childrenByParent.get(entryId) ?? [])
+      .filter(eligibleEntryId)
+      .map((childId) => this.recordedEdge(session, entry, childId, 'child'))
     const allBranchSiblings = entry.parentId !== null
       ? (tree.childrenByParent.get(entry.parentId) ?? [])
           .filter((childId) => childId !== entryId)
+          .filter(eligibleEntryId)
           .map((childId) => this.derivedEdge(session, entry, childId, 'branch-sibling'))
       : []
 
     const related: TraceEdge[] = []
     for (const record of session.relationships) {
       if (record.sourceEntryId !== entryId && record.targetEntryId !== entryId) continue
+      if (!eligibleEntryId(record.sourceEntryId) || !eligibleEntryId(record.targetEntryId)) continue
       related.push(recordToTraceEdge(session, record))
     }
+    related.push(...this.crossSessionForkTraceEdges(session, entry, authRoot, execution))
 
     const children = allChildren.slice(0, this.traceMaxChildren)
     const branchSiblings = allBranchSiblings.slice(0, this.traceMaxChildren)
@@ -619,24 +921,63 @@ export class SearchProvider {
    */
   traceSession(sessionId: string, authRoot: string): SessionLineage {
     const session = this.requireAuthorizedSession(sessionId, authRoot)
+    const normalizedRoot = normalizePath(authRoot)
+    const parent = this.resolveParentSession(session, normalizedRoot)
     const childSessionIds: string[] = []
     for (const candidate of this.sessions.values()) {
-      const parentRef = candidate.header.parentSession
-      const matches =
-        parentRef === sessionId ||
-        (parentRef !== undefined && parentRef === session.sourceInfo.filePath)
-      if (matches) {
-        if (this.isSessionAuthorized(candidate, normalizePath(authRoot))) {
-          childSessionIds.push(candidate.header.sessionId)
-        }
+      if (!this.isSessionAuthorized(candidate, normalizedRoot)) continue
+      const candidateParent = this.resolveParentSession(candidate, normalizedRoot)
+      if (candidateParent?.header.sessionId === sessionId) {
+        childSessionIds.push(candidate.header.sessionId)
       }
     }
     childSessionIds.sort()
     return {
       sessionId,
-      parentSessionId: session.header.parentSession ?? undefined,
+      parentSessionId: parent?.header.sessionId,
       childSessionIds,
     }
+  }
+
+  private crossSessionForkTraceEdges(
+    session: SessionRecord,
+    entry: import('../types.ts').EntryRecord,
+    authRoot: string,
+    execution?: ExecutionContext,
+  ): TraceEdge[] {
+    const target = { sessionId: session.header.sessionId, entryId: entry.id }
+    const edges: TraceEdge[] = []
+    const seen = new Set<string>()
+    for (const group of this.crossSessionForkGroups(authRoot, execution)) {
+      let destinations: EntryIdentity[] = []
+      const isParticipantAnchor =
+        group.at.entryId === entry.id && group.participantSessionIds.has(session.header.sessionId)
+      if (isParticipantAnchor) {
+        destinations = group.candidates
+      } else if (group.candidates.some((candidate) => sameIdentity(candidate, target))) {
+        destinations = group.candidates.filter((candidate) => !sameIdentity(candidate, target))
+      }
+      for (const destination of destinations) {
+        if (sameIdentity(destination, target)) continue
+        const edgeKey = identityKey(destination)
+        if (seen.has(edgeKey)) continue
+        seen.add(edgeKey)
+        const destinationSession = this.sessions.get(destination.sessionId)
+        const destinationEntry = destinationSession?.tree.byId.get(destination.entryId)
+        edges.push({
+          type: 'session-fork',
+          from: target,
+          to: destination,
+          recorded: false,
+          derived: true,
+          detail: `fork at ${group.at.sessionId}/${group.at.entryId}`,
+          targetBranchState: destinationEntry?.branchState ?? 'unknown',
+          leadsToMaterializedLeaf:
+            destinationSession !== undefined && destinationSession.tree.selectedSet.has(destination.entryId),
+        })
+      }
+    }
+    return edges
   }
 
   private recordedEdge(session: SessionRecord, fromEntry: import('../types.ts').EntryRecord, toEntryId: string, type: string): TraceEdge {
@@ -698,4 +1039,16 @@ function recordToTraceEdge(session: SessionRecord, record: RelationshipRecord): 
     leadsToMaterializedLeaf:
       targetEntry !== undefined && session.tree.selectedSet.has(targetEntry.id),
   }
+}
+
+function identityKey(identity: EntryIdentity): string {
+  return `${identity.sessionId}\u0000${identity.entryId}`
+}
+
+function sameIdentity(left: EntryIdentity, right: EntryIdentity): boolean {
+  return left.sessionId === right.sessionId && left.entryId === right.entryId
+}
+
+function isDurableEntryHash(value: string): boolean {
+  return /^[0-9a-f]{8}$/.test(value)
 }

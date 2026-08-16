@@ -58,9 +58,32 @@ test('readEvent reports an unresolved fork on an alternate branch', () => {
   const provider = new SearchProvider()
   provider.indexSession(parsed, makeSourceInfo(parsed))
   const read = provider.readEvent('s1', 'C', { order: 'branch', after: 2 }, '/tmp/ws')
-  assert.equal(read.neighbors.fork?.atEntryId, 'C')
-  assert.deepEqual(read.neighbors.fork?.candidateChildIds, ['D', 'G'])
+  assert.deepEqual(read.neighbors.forks, [
+    {
+      kind: 'in-session',
+      at: { sessionId: 's1', entryId: 'B' },
+      candidates: [{ sessionId: 's1', entryId: 'C' }, { sessionId: 's1', entryId: 'E' }],
+      chosen: { sessionId: 's1', entryId: 'C' },
+    },
+    {
+      kind: 'in-session',
+      at: { sessionId: 's1', entryId: 'C' },
+      candidates: [{ sessionId: 's1', entryId: 'D' }, { sessionId: 's1', entryId: 'G' }],
+      chosen: undefined,
+    },
+  ])
   const trace = provider.traceEvent('s1', 'C', '/tmp/ws')
   assert.deepEqual(trace.children.map((edge) => targetEntryId(edge.to)), ['D', 'G'])
   provider.close()
+})
+
+test('an offset at or beyond the end returns an empty exact window', () => {
+  const atEnd = makeTextPreview('abc', { offset: 3, windowChars: 2 })
+  assert.equal(atEnd.text, '')
+  assert.deepEqual(atEnd.shownRanges, [])
+  assert.deepEqual(atEnd.omittedRanges, [{ start: 0, end: 3 }])
+  assert.equal(atEnd.truncated, true)
+
+  const beyond = makeTextPreview('abc', { offset: 99, windowChars: 2 })
+  assert.deepEqual(beyond, atEnd)
 })

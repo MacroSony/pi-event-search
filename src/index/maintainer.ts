@@ -8,6 +8,10 @@ import type { SearchProvider } from './provider.ts'
 export interface MaintainerConfig {
   provider: SearchProvider
   discovery?: DiscoveryConfig
+  /** Maximum source bytes parsed by one scoped refresh. Unlimited by default. */
+  maxScopedSourceBytes?: number
+  /** Maximum session files parsed by one scoped refresh. Unlimited by default. */
+  maxScopedFiles?: number
 }
 
 export interface SyncItem {
@@ -20,16 +24,31 @@ export interface SyncItem {
 export interface SyncReport {
   items: SyncItem[]
   removedSessionIds: string[]
+  coverage?: ScopedRefreshCoverage
+}
+
+export interface ScopedRefreshCoverage {
+  authorizedFiles: number
+  authorizedBytes: number
+  selectedFiles: number
+  selectedBytes: number
+  skippedFiles: number
+  skippedBytes: number
+  limited: boolean
 }
 
 export class IndexMaintainer {
   readonly provider: SearchProvider
   private readonly discoveryConfig: DiscoveryConfig
+  private readonly maxScopedSourceBytes: number
+  private readonly maxScopedFiles: number
   private readonly fileToSession = new Map<string, string>()
 
   constructor(config: MaintainerConfig) {
     this.provider = config.provider
     this.discoveryConfig = config.discovery ?? {}
+    this.maxScopedSourceBytes = normalizeLimit(config.maxScopedSourceBytes)
+    this.maxScopedFiles = normalizeLimit(config.maxScopedFiles)
     this.rebuildFileMap()
   }
 
@@ -81,30 +100,61 @@ export class IndexMaintainer {
     const normalizedRoot = normalizePath(root)
     const files = discoverSessionFiles(this.discoveryConfig)
     const report: SyncReport = { items: [], removedSessionIds: [] }
-    const authorizedFiles: string[] = []
+    const authorizedFiles: Array<{ filePath: string; size: number; mtimeMs: number }> = []
+    const uncertainFiles = new Set<string>()
 
     for (const filePath of files) {
       let header: SessionHeader
+      let stat: fs.Stats
       try {
+        stat = fs.statSync(filePath)
         header = readSessionHeader(filePath)
       } catch (err) {
+        // An unreadable or malformed header is not evidence that a previously
+        // indexed source disappeared. Preserve its last-known-good record.
+        uncertainFiles.add(canonicalIfExists(filePath))
         report.items.push({ filePath, action: 'error', error: (err as Error).message })
         continue
       }
       if (isPathWithin(header.cwd, normalizedRoot)) {
-        authorizedFiles.push(filePath)
+        authorizedFiles.push({ filePath, size: stat.size, mtimeMs: stat.mtimeMs })
       }
     }
 
-    for (const filePath of authorizedFiles) {
+    // Prefer recent sessions when the extension supplies a startup budget.
+    // The core maintainer remains unlimited unless configured otherwise.
+    authorizedFiles.sort((a, b) => b.mtimeMs - a.mtimeMs || a.filePath.localeCompare(b.filePath))
+    const selectedFiles: typeof authorizedFiles = []
+    let selectedBytes = 0
+    for (const candidate of authorizedFiles) {
+      if (selectedFiles.length >= this.maxScopedFiles) continue
+      if (candidate.size > this.maxScopedSourceBytes - selectedBytes) continue
+      selectedFiles.push(candidate)
+      selectedBytes += candidate.size
+    }
+
+    const authorizedBytes = authorizedFiles.reduce((total, candidate) => total + candidate.size, 0)
+    report.coverage = {
+      authorizedFiles: authorizedFiles.length,
+      authorizedBytes,
+      selectedFiles: selectedFiles.length,
+      selectedBytes,
+      skippedFiles: authorizedFiles.length - selectedFiles.length,
+      skippedBytes: authorizedBytes - selectedBytes,
+      limited: selectedFiles.length !== authorizedFiles.length,
+    }
+
+    for (const { filePath } of selectedFiles) {
       report.items.push(this.syncFile(filePath))
     }
 
-    const observed = new Set(authorizedFiles.map(canonicalIfExists))
+    const observed = new Set(selectedFiles.map(({ filePath }) => canonicalIfExists(filePath)))
     const toRemove: string[] = []
     for (const session of this.provider.sessionsList) {
       const comparable = canonicalIfExists(session.sourceInfo.filePath)
-      if (!observed.has(comparable)) toRemove.push(session.header.sessionId)
+      if (!observed.has(comparable) && !uncertainFiles.has(comparable)) {
+        toRemove.push(session.header.sessionId)
+      }
     }
     for (const sessionId of toRemove) {
       this.provider.removeSession(sessionId)
@@ -198,4 +248,10 @@ function canonicalIfExists(filePath: string): string {
   } catch {
     return filePath
   }
+}
+
+function normalizeLimit(value: number | undefined): number {
+  if (value === undefined) return Number.POSITIVE_INFINITY
+  if (!Number.isFinite(value) || value < 0) return Number.POSITIVE_INFINITY
+  return Math.floor(value)
 }

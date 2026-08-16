@@ -10,7 +10,7 @@ const PI_SESSION = `{"type":"session","version":3,"id":"pi-session-1","timestamp
 {"type":"message","id":"a1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"hello searchable world"}}
 {"type":"message","id":"a2","parentId":"a1","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private secret"},{"type":"text","text":"visible answer"},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"npm test"}}]}}
 {"type":"message","id":"a3","parentId":"a2","timestamp":"2026-01-01T00:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash","content":[{"type":"text","text":"tests passed"}],"isError":false}}
-{"type":"bashExecution","id":"a4","parentId":"a3","timestamp":"2026-01-01T00:00:04.000Z","command":"ls -la","output":"file list","exitCode":0}
+{"type":"message","id":"a4","parentId":"a3","timestamp":"2026-01-01T00:00:04.000Z","message":{"role":"bashExecution","command":"ls -la","output":"file list","exitCode":0,"cancelled":false,"truncated":false,"timestamp":1767225604000}}
 {"type":"custom","id":"a5","parentId":"a4","timestamp":"2026-01-01T00:00:05.000Z","customType":"state-ext","data":{"count":42}}
 {"type":"custom_message","id":"a6","parentId":"a5","timestamp":"2026-01-01T00:00:06.000Z","customType":"injected","content":"injected context note","display":true}
 {"type":"session_info","id":"a7","parentId":"a6","timestamp":"2026-01-01T00:00:07.000Z","name":"My Pi Session"}
@@ -38,6 +38,10 @@ test('projects Pi message entries into typed fragments', () => {
   const a3 = projector.project(parsed.header.sessionId, parsed.entries[2])
   assert.equal(a3.fragments[0].semanticKind, 'tool.result')
   assert.equal(a3.fragments[0].toolCallId, 'call_1')
+
+  const a4 = projector.project(parsed.header.sessionId, parsed.entries[3])
+  assert.equal(a4.role, 'tool')
+  assert.deepEqual(a4.fragments.map((fragment) => fragment.semanticKind), ['bash.command', 'bash.output'])
 })
 
 test('search over Pi sessions excludes thinking and custom state, includes custom_message', () => {
@@ -49,6 +53,38 @@ test('search over Pi sessions excludes thinking and custom state, includes custo
   assert.equal(provider.searchEvents({ query: 'state-ext' }, root).length, 0)
   assert.equal(provider.searchEvents({ query: 'injected' }, root).length, 1)
   assert.equal(provider.searchEvents({ query: 'searchable' }, root).length, 1)
+  assert.equal(provider.searchEvents({ query: 'file list' }, root).length, 1)
+  provider.close()
+})
+
+test('actual Pi toolResult messages retain searchable head and tail tokens', () => {
+  const output = `pi_head_token ${'x'.repeat(12_000)} pi_tail_token`
+  const text = [
+    '{"type":"session","version":3,"id":"pi-long","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}',
+    JSON.stringify({
+      type: 'message',
+      id: 'a1',
+      parentId: null,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'call_long',
+        toolName: 'bash',
+        content: [{ type: 'text', text: output }],
+        isError: false,
+      },
+    }),
+  ].join('\n')
+  const parsed = parseSessionText(text)
+  const provider = new SearchProvider()
+  provider.indexSession(parsed, makeSourceInfo(parsed))
+  for (const query of ['pi_head_token', 'pi_tail_token']) {
+    const hit = provider.searchEvents({ query }, { authRoot: '/tmp/ws' })[0]
+    assert.ok(hit)
+    assert.equal(hit.entryId, 'a1')
+    assert.equal(hit.semanticKind, 'tool.result')
+  }
+  assert.equal(provider.readEvent('pi-long', 'a1', {}, '/tmp/ws').fragments[0].preview.totalChars, output.length + 5)
   provider.close()
 })
 

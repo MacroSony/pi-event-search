@@ -151,6 +151,8 @@ export interface EventSearchHit {
   cwd: string
   entryId: string
   entryType: string
+  /** Strongest matching fragment retained as evidence for the event hit. */
+  matchingFragmentId: string
   semanticKind: string
   timestamp: string
   branchState: string
@@ -169,6 +171,8 @@ export interface ReadEventOptions {
   order?: ReadOrder
   before?: number
   after?: number
+  /** Read only this deterministic fragment within the event. */
+  fragmentId?: string
   /** Unicode code-point offset for a fixed-size contiguous window. */
   offset?: number
   windowChars?: number
@@ -187,6 +191,7 @@ export interface ReadEventNeighbor {
 }
 
 export interface ReadEventFragment {
+  fragmentId: string
   semanticKind: SemanticKind
   toolName?: string
   isError?: boolean
@@ -206,13 +211,29 @@ export interface ReadEventResult {
   role: Role
   contextRole: ContextRole
   fragments: ReadEventFragment[]
+  fragmentCoverage: {
+    total: number
+    returned: number
+    omitted: number
+    truncated: boolean
+  }
   neighbors: {
     order: ReadOrder
     before: ReadEventNeighbor[]
     after: ReadEventNeighbor[]
-    /** Reported at a fork on an alternate branch after the target. */
-    fork?: { atEntryId: string; candidateChildIds: string[] }
+    /** Forks encountered on the returned branch path. */
+    forks: BranchForkReceipt[]
   }
+}
+
+export interface BranchForkReceipt {
+  kind: 'in-session' | 'session-fork'
+  /** Canonical event at which the continuations diverge. */
+  at: EntryIdentity
+  /** All continuations visible and authorized for this invocation. */
+  candidates: EntryIdentity[]
+  /** Present when branch order selected a continuation. */
+  chosen?: EntryIdentity
 }
 
 // ---------------------------------------------------------------------------

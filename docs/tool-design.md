@@ -54,6 +54,14 @@ interface EventSearchRequest {
 `query` contains plain terms and quoted phrases; separate terms use implicit
 AND. Boolean operators, column syntax, and other raw FTS expressions are not
 part of the public language. Metadata constraints use the structured fields.
+Latin identifiers use token matching rather than arbitrary substring matching,
+so dogfood markers embedded directly inside a longer alphanumeric run require
+separators. CJK text is segmented separately to retain useful substring search.
+
+Calls and results from `event_search`, `event_read`, and `event_trace` remain
+indexed as audit evidence but are suppressed from ordinary search results. An
+explicit `toolNames` filter opts into them, preventing retrieval output from
+recursively becoming the strongest evidence for its own query.
 
 The Pi tool should own the result limit and provider pagination. A model-controlled unbounded limit is not part of the first contract.
 
@@ -66,6 +74,7 @@ interface EventSearchHit {
   cwd: string
   entryId: string
   entryType: string
+  matchingFragmentId: string
   semanticKind: string
   timestamp: string
   branchState: string
@@ -77,8 +86,9 @@ interface EventSearchHit {
 
 FTS ranks fragments internally. Fragments with the same `(sessionId, entryId)`
 are coalesced into one `EventSearchHit`, using the strongest fragment for
-`semanticKind` and `snippet`. Other matching fragments may be named in bounded
-metadata, but they do not produce duplicate event results.
+`matchingFragmentId`, `semanticKind`, and `snippet`. Other matching fragments
+may be named in bounded metadata, but they do not produce duplicate event
+results.
 
 ### `readEvent`
 
@@ -101,7 +111,26 @@ the target, it follows `parentId`; the closest requested predecessors are
 returned in conversational order. After the target, it follows the child toward
 the materialized leaf when the target is on that path. On an alternate branch,
 it follows a sole-child chain but stops at the first unresolved fork. The read
-reports the chosen child and any alternate child ids at each encountered fork.
+reports the chosen continuation and all visible alternatives at each encountered
+fork, including Pi forks that copied history into another session.
+
+Fork receipts are plural because one bounded path may cross several forks.
+Every identity includes its session because Pi's `--fork` workflow copies entry
+ids into the child session:
+
+```ts
+interface BranchForkReceipt {
+  kind: 'in-session' | 'session-fork'
+  at: { sessionId: string; entryId: string }
+  candidates: Array<{ sessionId: string; entryId: string }>
+  chosen?: { sessionId: string; entryId: string }
+}
+```
+
+For `session-fork`, the parent-session event is the canonical `at` identity.
+The fork anchor and continuations are derived only when the recorded parent
+session is indexed and authorized. A missing, skipped, or unauthorized parent
+does not expose its source path through the receipt.
 
 Alternative branch contents are not mixed into the linear neighbor window.
 `append` is deterministic log chronology and is useful for debugging indexing,
@@ -123,11 +152,16 @@ interface TextPreview {
 }
 ```
 
-Instead of a special “jump to middle” operation, `event_read` accepts an
-optional character offset for a fixed-size contiguous window. This lets the
-caller inspect the middle—or any other omitted range—without allowing it to
-raise the output cap. Offsets and ranges use Unicode code points, not UTF-16
-code units, so they remain stable for non-ASCII text.
+Instead of a special “jump to middle” operation, `event_read` accepts the
+`matchingFragmentId` returned by search plus an optional character offset for a
+fixed-size contiguous window. This lets the caller inspect the middle—or any
+other omitted range—of one exact fragment without allowing it to raise the
+output cap. Offsets and ranges use non-negative Unicode code-point integers,
+not UTF-16 code units, so they remain stable for non-ASCII text.
+
+An unfiltered read returns at most a configured number of fragments and reports
+`total`, `returned`, `omitted`, and `truncated` fragment coverage. A targeted
+fragment read is not displaced by that cap.
 
 ### `traceEvent`
 
@@ -150,8 +184,9 @@ marked as derived adjacency. Nodes and edges report selected/alternate/unknown
 branch state and whether they lead toward the materialized leaf.
 
 `related` contains associated tool call/result, compaction or branch-summary
-edges, labels, and file evidence when present. Trace nodes contain bounded
-metadata and previews; `event_read` remains the content operation.
+edges, labels, file evidence, and derived cross-session fork edges when present.
+Trace nodes contain bounded metadata and previews; `event_read` remains the
+content operation.
 
 Transitive traversal should be opt-in and bounded. Every inferred edge is marked as inferred.
 
@@ -184,11 +219,22 @@ justifies a fourth public tool.
 - Operational details and source paths are logged locally but sanitized at the model boundary.
 - A read-only declaration describes product intent, not OS sandboxing.
 
+## Current index policy
+
+The extension builds a disposable workspace-scoped index at startup, then
+synchronizes only the current session on hot paths. Startup source bytes and
+session count are bounded; partial coverage is explicitly reported to the
+caller. The agreed next-milestone replacement is recorded in
+[Persistent index lifecycle](index-lifecycle.md); it is not part of the current
+implementation.
+
 ## Remaining implementation choices
 
-1. **Index placement and refresh:** one global derived index with authorization at query time is the current recommendation; startup and post-turn incremental refresh still need concrete triggers.
-2. **Initial budgets:** exact search-result counts and character caps should be chosen as dogfood defaults and made locally configurable.
+1. **Initial budgets:** continue tuning search-result counts, character caps, and startup coverage from dogfood measurements.
 
-## Recommended first vertical slice
+## Current vertical slice
 
-Implement one parser/projector over test fixture sessions, one disposable in-memory FTS5 provider, and two programmatic operations: `searchEvents` and `readEvent`. Do not register Pi tools until their authorization behavior and source fidelity are covered by tests.
+The parser/projector, disposable FTS5 provider, search/read/trace services, and
+three Pi tools are implemented and covered by unit and entrypoint registration
+tests. The next product step is controlled dogfooding; the next indexing
+architecture milestone is the persistent lifecycle specified above.

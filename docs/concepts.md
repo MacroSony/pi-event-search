@@ -26,6 +26,13 @@ The source identity of an entry is the pair:
 
 Line numbers and SQLite row ids are observations of a particular representation and must not become public identity.
 
+Pi may implement `--fork` by copying a prefix of entries into a new session.
+Those copied entries retain their entry ids, so entry ids are never globally
+unique. Cross-session fork anchors and continuations must always use the full
+`(sessionId, entryId)` identity. The child header's recorded `parentSession`
+reference establishes lineage; the exact entry-level fork is derived from the
+shared prefix only when both sessions are indexed and authorized.
+
 ### Event
 
 An event is the normalized, typed interpretation of one entry. The event retains the complete source identity and raw entry type.
@@ -44,6 +51,10 @@ A fragment is one searchable semantic part of an event. One entry may produce ze
 For example, one assistant message entry can contain visible text, private thinking, and several tool-call blocks. Those parts need separate kinds and ranking behavior, but every fragment still resolves to the same source event.
 
 A fragment identity is local to its event. Its exact encoding remains an implementation detail, but it must be deterministic for unchanged source content.
+
+The strongest matching fragment id is public search evidence. It lets
+`event_read` address a bounded window inside one particular text or tool-call
+fragment without changing the event-level result identity.
 
 ### Hit
 
@@ -78,8 +89,8 @@ The first-party projector should recognize these semantic kinds:
 | `assistant.thinking` | assistant message | excluded from the MVP |
 | `tool.call` | assistant tool-call block | tool name and normalized arguments |
 | `tool.result` | tool-result message | tool name, visible result text, and error state |
-| `bash.command` | bash-execution message | command text |
-| `bash.output` | bash-execution message | bounded output text |
+| `bash.command` | Pi `message.role = bashExecution` (plus legacy shapes) | command text |
+| `bash.output` | Pi `message.role = bashExecution` (plus legacy shapes) | bounded output text |
 | `summary.compaction` | compaction entry | summary text |
 | `summary.branch` | branch-summary entry | summary text |
 | `custom.message` | model-visible custom message | visible text and custom type |
@@ -236,6 +247,11 @@ Semantic embeddings remain a provider-level extension. If added, they should tar
 ## Presentation and fidelity
 
 Search snippets are bounded plain text. They may normalize whitespace and mark matching spans, but they must not silently paraphrase source content.
+
+Oversized indexed fragments preserve bounded head and tail evidence so final
+errors and status lines remain searchable. A visible omission marker separates
+the two ranges and prevents phrase matching across content that was not adjacent
+in the source.
 
 Exact reads distinguish source fidelity from transport size:
 

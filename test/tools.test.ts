@@ -23,7 +23,27 @@ test('event_search returns bounded hits', () => {
     for (const hit of response.result) {
       assert.equal(typeof hit.sessionId, 'string')
       assert.equal(typeof hit.entryId, 'string')
+      assert.equal(typeof hit.matchingFragmentId, 'string')
     }
+  }
+})
+
+test('event_read accepts a matching fragment id from event_search', () => {
+  const { service: svc } = service()
+  const search = handleEventSearch(svc, { query: 'assistant reply' }, { cwd: '/tmp/ws' })
+  assert.equal(search.ok, true)
+  if (!search.ok) return
+  const hit = search.result.find((candidate) => candidate.entryId === 'B')
+  assert.ok(hit)
+  const response = handleEventRead(svc, {
+    sessionId: 's1',
+    entryId: 'B',
+    fragmentId: hit.matchingFragmentId,
+  }, { cwd: '/tmp/ws' })
+  assert.equal(response.ok, true)
+  if (response.ok) {
+    assert.equal(response.result.fragments.length, 1)
+    assert.equal(response.result.fragments[0].fragmentId, hit.matchingFragmentId)
   }
 })
 

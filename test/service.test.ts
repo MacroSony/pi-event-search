@@ -38,11 +38,51 @@ test('searchEvents "current" without a current session fails clearly', () => {
   )
 })
 
-test('readEvent and traceEvent accept "current"', () => {
+test('readEvent and traceEvent accept "current" and enforce the invocation cutoff', () => {
   const svc = service()
-  const invocation = { cwd: '/tmp/ws', currentSessionId: 's1' }
-  const read = svc.readEvent('current', 'A', {}, invocation)
-  assert.equal(read.entryId, 'A')
-  const trace = svc.traceEvent('current', 'E', invocation)
+  const read = svc.readEvent('current', 'E', { after: 2 }, CURRENT)
+  assert.deepEqual(read.neighbors.after, [])
+  const appendRead = svc.readEvent('current', 'E', { order: 'append', after: 2 }, CURRENT)
+  assert.deepEqual(appendRead.neighbors.after, [])
+  assert.throws(
+    () => svc.readEvent('current', 'F', {}, CURRENT),
+    (err: unknown) => err instanceof PiEventSearchError && err.code === 'NOT_FOUND',
+  )
+
+  const trace = svc.traceEvent('current', 'E', CURRENT)
+  assert.deepEqual(trace.children, [])
+  assert.throws(
+    () => svc.traceEvent('current', 'F', CURRENT),
+    (err: unknown) => err instanceof PiEventSearchError && err.code === 'NOT_FOUND',
+  )
+
+  // The same policy applies when callers use the concrete current session id.
+  const concrete = svc.readEvent('s1', 'A', {}, CURRENT)
+  assert.equal(concrete.entryId, 'A')
+  assert.throws(
+    () => svc.traceEvent('s1', 'F', CURRENT),
+    (err: unknown) => err instanceof PiEventSearchError && err.code === 'NOT_FOUND',
+  )
+
+  assert.equal(read.entryId, 'E')
   assert.equal(trace.target.entryId, 'E')
+})
+
+test('traceEvent cutoff hides branch siblings appended at or after invocation', () => {
+  const svc = service()
+  const invocation = { cwd: '/tmp/ws', currentSessionId: 's1', invocationEntryId: 'E' }
+  const trace = svc.traceEvent('current', 'C', invocation)
+  assert.deepEqual(trace.branchSiblings, [])
+})
+
+test('readEvent rejects fractional bounds and empty fragment ids', () => {
+  const svc = service()
+  assert.throws(
+    () => svc.readEvent('s1', 'A', { offset: 1.5 }, { cwd: '/tmp/ws' }),
+    (err: unknown) => err instanceof PiEventSearchError && err.code === 'INVALID_ARGUMENT',
+  )
+  assert.throws(
+    () => svc.readEvent('s1', 'A', { fragmentId: '' }, { cwd: '/tmp/ws' }),
+    (err: unknown) => err instanceof PiEventSearchError && err.code === 'INVALID_ARGUMENT',
+  )
 })

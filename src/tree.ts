@@ -17,8 +17,15 @@ export interface SessionTree {
 
 export interface BranchSuccessor {
   entryId: string | null
-  /** Present when the successor is ambiguous; the caller must report the fork. */
-  fork?: { atEntryId: string; candidateChildIds: string[] }
+  /** Present whenever this step crosses or stops at a fork. */
+  fork?: BranchFork
+}
+
+export interface BranchFork {
+  atEntryId: string
+  candidateChildIds: string[]
+  /** Missing when no continuation can be selected safely. */
+  chosenChildId?: string
 }
 
 /** Build the tree and enrich entries with branch and selection state. */
@@ -124,7 +131,14 @@ export function branchSuccessor(entryId: string, tree: SessionTree): BranchSucce
   if (tree.selectedSet.has(entryId)) {
     const index = tree.selectedPath.indexOf(entryId)
     if (index >= 0 && index + 1 < tree.selectedPath.length) {
-      return { entryId: tree.selectedPath[index + 1] }
+      const chosenChildId = tree.selectedPath[index + 1]
+      const children = tree.childrenByParent.get(entryId) ?? []
+      return {
+        entryId: chosenChildId,
+        fork: children.length > 1
+          ? { atEntryId: entryId, candidateChildIds: children, chosenChildId }
+          : undefined,
+      }
     }
     return { entryId: null }
   }
@@ -175,21 +189,33 @@ export function branchDescendants(
   entryId: string,
   tree: SessionTree,
   limit: number,
-): { entries: EntryRecord[]; fork?: { atEntryId: string; candidateChildIds: string[] } } {
+): { entries: EntryRecord[]; forks: BranchFork[] } {
   const result: EntryRecord[] = []
+  const forks: BranchFork[] = []
   let cursor = entryId
   const guard = new Set<string>()
   while (result.length < limit && cursor !== null && !guard.has(cursor)) {
     guard.add(cursor)
     const next = branchSuccessor(cursor, tree)
+    if (next.fork) forks.push(next.fork)
     if (next.entryId === null) {
-      if (next.fork) return { entries: result, fork: next.fork }
-      return { entries: result }
+      return { entries: result, forks }
     }
     const entry = tree.byId.get(next.entryId)
-    if (!entry) return { entries: result }
+    if (!entry) return { entries: result, forks }
     result.push(entry)
     cursor = next.entryId
   }
-  return { entries: result }
+  return { entries: result, forks }
+}
+
+/** Describe a fork crossed by a known parent -> child branch edge. */
+export function branchForkForEdge(
+  parentEntryId: string,
+  chosenChildId: string,
+  tree: SessionTree,
+): BranchFork | undefined {
+  const children = tree.childrenByParent.get(parentEntryId) ?? []
+  if (children.length <= 1 || !children.includes(chosenChildId)) return undefined
+  return { atEntryId: parentEntryId, candidateChildIds: children, chosenChildId }
 }

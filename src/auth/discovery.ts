@@ -13,7 +13,9 @@ export const DEFAULT_EXTENSIONS = ['.jsonl']
 
 export function defaultSessionDir(): string {
   // Pi stores sessions under ~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl
-  return process.env['PI_SESSION_DIR'] ?? path.join(os.homedir(), '.pi', 'agent', 'sessions')
+  return process.env['PI_CODING_AGENT_SESSION_DIR']
+    ?? process.env['PI_SESSION_DIR']
+    ?? path.join(os.homedir(), '.pi', 'agent', 'sessions')
 }
 
 /**

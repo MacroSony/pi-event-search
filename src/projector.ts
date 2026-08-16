@@ -264,6 +264,10 @@ export class Projector {
         fragment.isError = isError
         return this.projection(entry, 'tool', 'conversation', [fragment])
       }
+      case 'bashExecution': {
+        const contextRole: ContextRole = message['excludeFromContext'] === true ? 'control' : 'conversation'
+        return this.projection(entry, 'tool', contextRole, this.projectBashSource(entry, message))
+      }
       default:
         return this.projection(entry, 'metadata', 'conversation', [])
     }
@@ -310,18 +314,23 @@ export class Projector {
   }
 
   private projectBashExecution(entry: RawEntry): Fragment[] {
+    return this.projectBashSource(entry, entry)
+  }
+
+  /** Project both Pi's persisted message.role shape and legacy fixture entries. */
+  private projectBashSource(entry: RawEntry, source: Record<string, unknown>): Fragment[] {
     const fragments: Fragment[] = []
-    const command = stringField(entry, 'command') ?? ''
+    const command = recordStringField(source, 'command') ?? ''
     if (command.length > 0) {
       const fragment = this.fragment(entry, SEMANTIC_KINDS.BASH_COMMAND, command, 0)
       fragment.toolName = 'bash'
       fragments.push(fragment)
     }
-    const output = stringField(entry, 'output') ?? ''
+    const output = recordStringField(source, 'output') ?? ''
     if (output.length > 0) {
       const fragment = this.fragment(entry, SEMANTIC_KINDS.BASH_OUTPUT, output, 1)
       fragment.toolName = 'bash'
-      const exitCode = entry['exitCode']
+      const exitCode = source['exitCode']
       fragment.isError = typeof exitCode === 'number' && exitCode !== 0
       fragments.push(fragment)
     }
@@ -401,7 +410,11 @@ function textFromContent(content: unknown): string {
 }
 
 function stringField(entry: RawEntry, key: string): string | null {
-  const value = entry[key]
+  return recordStringField(entry, key)
+}
+
+function recordStringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key]
   return typeof value === 'string' ? value : null
 }
 
@@ -449,8 +462,17 @@ export function truncateCodePoints(text: string, maxChars: number): string {
   if (maxChars <= 0) return ''
   const length = codePointLength(text)
   if (length <= maxChars) return text
-  const sliced = codePointSlice(text, 0, maxChars)
-  return `${sliced}\u2026`
+  // Searchable projection keeps both ends of oversized content. Tool failures,
+  // summaries, and final status lines commonly appear at the tail. The marker
+  // consumes part of the hard budget and also prevents FTS phrases from joining
+  // tokens that were not adjacent in the source.
+  const marker = '\n[pi-event-search:omitted]\n'
+  const markerChars = codePointLength(marker)
+  if (maxChars <= markerChars + 1) return codePointSlice(text, 0, maxChars)
+  const contentBudget = maxChars - markerChars
+  const headChars = Math.ceil(contentBudget / 2)
+  const tailChars = Math.floor(contentBudget / 2)
+  return `${codePointSlice(text, 0, headChars)}${marker}${codePointSlice(text, length - tailChars, length)}`
 }
 
 export function codePointSlice(text: string, start: number, end: number): string {

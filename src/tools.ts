@@ -50,17 +50,18 @@ export const eventSearchToolDefinition: ToolDefinition = {
 export const eventReadToolDefinition: ToolDefinition = {
   name: 'event_read',
   description:
-    'Read-only lookup of one authorized source event by (sessionId, entryId) with bounded text windows and exact truncation receipts.',
+    'Read-only lookup of one authorized source event by (sessionId, entryId), optionally targeting a matchingFragmentId, with bounded text windows and exact truncation receipts.',
   inputSchema: {
     type: 'object',
     properties: {
       sessionId: { type: 'string', description: 'Session id, or "current" for the invoking session.' },
       entryId: { type: 'string' },
+      fragmentId: { type: 'string', description: 'Optional matchingFragmentId from event_search; when set, only that fragment is returned.' },
       order: { type: 'string', enum: ['branch', 'append'] },
-      before: { type: 'number', description: 'Neighbor count before the target.' },
-      after: { type: 'number', description: 'Neighbor count after the target.' },
-      offset: { type: 'number', description: 'Unicode code-point offset for a fixed-size contiguous window.' },
-      windowChars: { type: 'number', description: 'Fixed window size in Unicode code points.' },
+      before: { type: 'integer', minimum: 0, maximum: 5, description: 'Neighbor count before the target.' },
+      after: { type: 'integer', minimum: 0, maximum: 5, description: 'Neighbor count after the target.' },
+      offset: { type: 'integer', minimum: 0, description: 'Unicode code-point offset for a fixed-size contiguous window.' },
+      windowChars: { type: 'integer', minimum: 1, maximum: 4000, description: 'Fixed window size in Unicode code points.' },
     },
     required: ['sessionId', 'entryId'],
   },

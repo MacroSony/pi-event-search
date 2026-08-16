@@ -63,18 +63,20 @@ function firstMatchIndex(text: string, terms: string[]): number {
  */
 export function makeTextPreview(text: string, options: TextPreviewOptions = {}): TextPreview {
   const totalChars = codePointLength(text)
-  const maxChars = options.maxChars ?? DEFAULT_PREVIEW_CHARS
-  const windowChars = options.windowChars ?? DEFAULT_WINDOW_CHARS
+  const maxChars = nonNegativeInteger(options.maxChars, DEFAULT_PREVIEW_CHARS)
+  const windowChars = nonNegativeInteger(options.windowChars, DEFAULT_WINDOW_CHARS)
 
   if (options.offset !== undefined) {
-    const start = clamp(options.offset, 0, Math.max(0, totalChars - 1))
+    const requestedOffset = nonNegativeInteger(options.offset, 0)
+    const start = clamp(requestedOffset, 0, totalChars)
     const end = Math.min(totalChars, start + windowChars)
     const shown = codePointSlice(text, start, end)
+    const shownRanges = end > start ? [{ start, end }] : []
     return {
       text: shown,
       totalChars,
-      shownRanges: [{ start, end }],
-      omittedRanges: omitRanges([{ start, end }], totalChars),
+      shownRanges,
+      omittedRanges: omitRanges(shownRanges, totalChars),
       truncated: end - start < totalChars,
     }
   }
@@ -132,4 +134,9 @@ function omitRanges(shown: TextRange[], totalChars: number): TextRange[] {
 function clamp(value: number, min: number, max: number): number {
   if (Number.isNaN(value)) return min
   return Math.min(max, Math.max(min, value))
+}
+
+function nonNegativeInteger(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.max(0, Math.floor(value))
 }

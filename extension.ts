@@ -15,12 +15,15 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { SearchProvider } from './src/index/provider.ts'
-import { IndexMaintainer } from './src/index/maintainer.ts'
+import { IndexMaintainer, type ScopedRefreshCoverage } from './src/index/maintainer.ts'
 import { defaultSessionDir } from './src/auth/discovery.ts'
 import { resolveWorkspaceRoot } from './src/auth/paths.ts'
 import { PiEventSearchService, type ServiceInvocation } from './src/api/service.ts'
 import { PiEventSearchError } from './src/errors.ts'
 import { parsedSessionFromSessionManager, sourceInfoForParsedSession } from './src/pi-adapter.ts'
+
+const DEFAULT_STARTUP_BUDGET_MB = 32
+const DEFAULT_STARTUP_FILE_LIMIT = 100
 
 export default function (pi: ExtensionAPI) {
   const provider = new SearchProvider()
@@ -28,11 +31,17 @@ export default function (pi: ExtensionAPI) {
   let maintainer: IndexMaintainer | null = null
   let lastRoot: string | null = null
   let lastDiscoveryKey: string | null = null
+  let lastCoverage: ScopedRefreshCoverage | undefined
+  let closed = false
+  const configuredWorkspaceRoot = process.env['PI_EVENT_SEARCH_WORKSPACE_ROOT']
+  const maxScopedSourceBytes = readStartupByteBudget()
+  const maxScopedFiles = readStartupFileLimit()
 
   function invocationFrom(ctx: any): ServiceInvocation {
     const cwd = ctx.sessionManager.getCwd?.() ?? process.cwd()
     return {
       cwd,
+      explicitWorkspaceRoot: configuredWorkspaceRoot,
       currentSessionId: ctx.sessionManager.getSessionId?.() ?? undefined,
       invocationEntryId: ctx.sessionManager.getLeafId?.() ?? undefined,
     }
@@ -50,26 +59,36 @@ export default function (pi: ExtensionAPI) {
     const roots = discoveryRoots(ctx)
     const key = roots.join('\n')
     if (maintainer === null || lastDiscoveryKey !== key) {
-      maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: roots } })
+      maintainer = new IndexMaintainer({
+        provider,
+        discovery: { sessionDirs: roots },
+        maxScopedSourceBytes,
+        maxScopedFiles,
+      })
       lastDiscoveryKey = key
       // Discovery roots changed; the next scoped refresh must run even if the
       // workspace root string is unchanged.
       lastRoot = null
+      lastCoverage = undefined
     }
     return maintainer
   }
 
   function resolveRoot(ctx: any): string {
     const cwd = ctx.sessionManager.getCwd?.() ?? process.cwd()
-    return resolveWorkspaceRoot({ cwd })
+    return resolveWorkspaceRoot({ cwd, explicitWorkspaceRoot: configuredWorkspaceRoot })
   }
 
   /** Full scoped discovery. Runs at startup and after workspace changes only. */
   function ensureScopedIndex(ctx: any): void {
     const root = resolveRoot(ctx)
     if (lastRoot === root) return
-    ensureMaintainer(ctx).scopedRefresh(root)
+    const report = ensureMaintainer(ctx).scopedRefresh(root)
+    lastCoverage = report.coverage
     lastRoot = root
+    if (report.coverage?.limited === true && ctx.hasUI) {
+      ctx.ui.notify(coverageNotice(report.coverage), 'warning')
+    }
   }
 
   /** Hot-path refresh: only the current session file (or SessionManager view). */
@@ -96,6 +115,12 @@ export default function (pi: ExtensionAPI) {
     syncCurrentSession(ctx)
   })
 
+  pi.on('session_shutdown', async () => {
+    if (closed) return
+    closed = true
+    provider.close()
+  })
+
   pi.registerTool({
     name: 'event_search',
     label: 'Event Search',
@@ -108,7 +133,7 @@ export default function (pi: ExtensionAPI) {
       'Do not mix synonyms or multiple languages in one query (e.g. avoid "修改 edit write 文件").',
       'Add structured filters (kinds, roles, toolNames, entryTypes) only when a previous hit told you the exact value.',
       'If event_search returns no hits, retry with fewer, simpler terms before concluding the event does not exist.',
-      'Use event_search to locate candidate (sessionId, entryId); then use event_read/event_trace for context and git diff to verify actual file changes.',
+      'Use event_search to locate candidate (sessionId, entryId); pass its matchingFragmentId to event_read when you need the exact matching fragment or another offset within it, then use event_trace for relationships and git diff to verify actual file changes.',
     ],
     parameters: Type.Object({
       query: Type.String({
@@ -134,9 +159,12 @@ export default function (pi: ExtensionAPI) {
       syncCurrentSession(ctx)
       try {
         const hits = service.searchEvents(params as any, invocationFrom(ctx))
-        const text = hits.length === 0
+        const resultText = hits.length === 0
           ? '0 hits. Terms are ANDed; too many terms or restrictive filters often cause this. Retry with a single concrete keyword like "edit" or "write_file", or remove filters.'
           : JSON.stringify(hits, null, 2)
+        const text = lastCoverage?.limited === true
+          ? `${coverageNotice(lastCoverage)}\n${resultText}`
+          : resultText
         return {
           content: [{ type: 'text', text }],
           details: {},
@@ -152,15 +180,16 @@ export default function (pi: ExtensionAPI) {
     name: 'event_read',
     label: 'Event Read',
     description:
-      'Read-only lookup of one authorized source event by (sessionId, entryId) with bounded text windows and exact truncation receipts.',
+      'Read-only lookup of one authorized source event by (sessionId, entryId), optionally targeting a matchingFragmentId, with bounded text windows and exact truncation receipts.',
     parameters: Type.Object({
       sessionId: Type.String({ description: 'Session id, or "current" for the invoking session.' }),
       entryId: Type.String(),
+      fragmentId: Type.Optional(Type.String({ minLength: 1, description: 'Optional matchingFragmentId from event_search; when set, only that fragment is returned.' })),
       order: Type.Optional(Type.Union([Type.Literal('branch'), Type.Literal('append')])),
-      before: Type.Optional(Type.Number({ minimum: 0, maximum: 20 })),
-      after: Type.Optional(Type.Number({ minimum: 0, maximum: 20 })),
-      offset: Type.Optional(Type.Number({ minimum: 0 })),
-      windowChars: Type.Optional(Type.Number({ minimum: 1, maximum: 4000 })),
+      before: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+      after: Type.Optional(Type.Integer({ minimum: 0, maximum: 5 })),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      windowChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 4000 })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       ensureMaintainer(ctx)
@@ -170,6 +199,7 @@ export default function (pi: ExtensionAPI) {
           order: params.order,
           before: params.before,
           after: params.after,
+          fragmentId: params.fragmentId,
           offset: params.offset,
           windowChars: params.windowChars,
         }, invocationFrom(ctx))
@@ -208,4 +238,30 @@ export default function (pi: ExtensionAPI) {
       }
     },
   })
+}
+
+function readStartupByteBudget(): number {
+  const raw = process.env['PI_EVENT_SEARCH_STARTUP_BUDGET_MB']
+  if (raw === undefined || raw.trim() === '') return DEFAULT_STARTUP_BUDGET_MB * 1024 * 1024
+  if (raw.trim().toLowerCase() === 'unlimited') return Number.POSITIVE_INFINITY
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_STARTUP_BUDGET_MB * 1024 * 1024
+  return Math.floor(value * 1024 * 1024)
+}
+
+function readStartupFileLimit(): number {
+  const raw = process.env['PI_EVENT_SEARCH_STARTUP_FILE_LIMIT']
+  if (raw === undefined || raw.trim() === '') return DEFAULT_STARTUP_FILE_LIMIT
+  if (raw.trim().toLowerCase() === 'unlimited') return Number.POSITIVE_INFINITY
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_STARTUP_FILE_LIMIT
+  return Math.floor(value)
+}
+
+function coverageNotice(coverage: ScopedRefreshCoverage): string {
+  return `Partial history index: ${coverage.selectedFiles}/${coverage.authorizedFiles} sessions (${formatMiB(coverage.selectedBytes)}/${formatMiB(coverage.authorizedBytes)}). ${coverage.skippedFiles} older/oversized sessions were skipped by the startup budget.`
+}
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }

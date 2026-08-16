@@ -155,6 +155,58 @@ test('scopedRefresh indexes only sessions authorized for the workspace root', ()
   fs.rmSync(dir, { recursive: true, force: true })
 })
 
+test('scopedRefresh preserves last-known-good sessions when header inspection fails', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-scoped-header-error-'))
+  const file = path.join(dir, 's1.jsonl')
+  writeSession(file, 's1', [{ id: 'A', text: 'last known good' }])
+  const provider = new SearchProvider()
+  const maintainer = new IndexMaintainer({ provider, discovery: { sessionDirs: [dir] } })
+
+  maintainer.scopedRefresh('/tmp/ws')
+  fs.writeFileSync(file, '{broken\n')
+  const report = maintainer.scopedRefresh('/tmp/ws')
+
+  assert.equal(report.items.some((item) => item.filePath === file && item.action === 'error'), true)
+  assert.deepEqual(report.removedSessionIds, [])
+  assert.equal(provider.hasSession('s1'), true)
+  assert.equal(provider.searchEvents({ query: 'known' }, { authRoot: '/tmp/ws' }).length, 1)
+
+  provider.close()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('scopedRefresh bounds startup parsing and reports partial coverage', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-scoped-budget-'))
+  const older = path.join(dir, 'older.jsonl')
+  const newer = path.join(dir, 'newer.jsonl')
+  writeSession(older, 'older', [{ id: 'A', text: 'older event' }])
+  writeSession(newer, 'newer', [{ id: 'A', text: 'newer event' }])
+  fs.utimesSync(older, new Date(1_700_000_000_000), new Date(1_700_000_000_000))
+  fs.utimesSync(newer, new Date(1_800_000_000_000), new Date(1_800_000_000_000))
+  const provider = new SearchProvider()
+  const maintainer = new IndexMaintainer({
+    provider,
+    discovery: { sessionDirs: [dir] },
+    maxScopedFiles: 1,
+  })
+
+  const report = maintainer.scopedRefresh('/tmp/ws')
+  assert.deepEqual(report.coverage, {
+    authorizedFiles: 2,
+    authorizedBytes: fs.statSync(older).size + fs.statSync(newer).size,
+    selectedFiles: 1,
+    selectedBytes: fs.statSync(newer).size,
+    skippedFiles: 1,
+    skippedBytes: fs.statSync(older).size,
+    limited: true,
+  })
+  assert.equal(provider.hasSession('newer'), true)
+  assert.equal(provider.hasSession('older'), false)
+
+  provider.close()
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
 test('syncFile stat fast path skips re-parsing unchanged current sessions', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pes-fastpath-'))
   const file = path.join(dir, 's1.jsonl')

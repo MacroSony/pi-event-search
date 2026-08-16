@@ -69,20 +69,31 @@ export class PiEventSearchService {
     options: ReadEventOptions,
     invocation: ServiceInvocation,
   ): ReadEventResult {
-    const root = this.resolveRoot(invocation)
+    const context = this.toSearchContext(invocation)
     const resolvedSessionId = this.resolveSessionId(sessionId, invocation)
+    if (options.fragmentId !== undefined && options.fragmentId.length === 0) {
+      throw new PiEventSearchError('INVALID_ARGUMENT', 'fragmentId must be a non-empty string.')
+    }
     const boundedOptions: ReadEventOptions = {
       ...options,
-      before: Math.min(options.before ?? 1, this.maxReadBefore),
-      after: Math.min(options.after ?? 1, this.maxReadAfter),
-      windowChars: Math.min(options.windowChars ?? 2000, this.maxWindowChars),
+      before: boundedInteger('before', options.before, 1, 0, this.maxReadBefore),
+      after: boundedInteger('after', options.after, 1, 0, this.maxReadAfter),
+      offset: options.offset === undefined
+        ? undefined
+        : boundedInteger('offset', options.offset, 0, 0, Number.MAX_SAFE_INTEGER),
+      windowChars: boundedInteger('windowChars', options.windowChars, 2000, 1, this.maxWindowChars),
     }
-    return this.provider.readEvent(resolvedSessionId, entryId, boundedOptions, root)
+    return this.provider.readEvent(resolvedSessionId, entryId, boundedOptions, context.authRoot, context.execution)
   }
 
   traceEvent(sessionId: string, entryId: string, invocation: ServiceInvocation): EventTrace {
-    const root = this.resolveRoot(invocation)
-    return this.provider.traceEvent(this.resolveSessionId(sessionId, invocation), entryId, root)
+    const context = this.toSearchContext(invocation)
+    return this.provider.traceEvent(
+      this.resolveSessionId(sessionId, invocation),
+      entryId,
+      context.authRoot,
+      context.execution,
+    )
   }
 
   traceSession(sessionId: string, invocation: ServiceInvocation): SessionLineage {
@@ -121,4 +132,21 @@ export class PiEventSearchService {
         : undefined
     return { authRoot: this.resolveRoot(invocation), execution }
   }
+}
+
+function boundedInteger(
+  name: string,
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const resolved = value ?? fallback
+  if (!Number.isSafeInteger(resolved) || resolved < minimum) {
+    throw new PiEventSearchError(
+      'INVALID_ARGUMENT',
+      `${name} must be an integer greater than or equal to ${minimum}.`,
+    )
+  }
+  return Math.min(resolved, maximum)
 }

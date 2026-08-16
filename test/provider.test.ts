@@ -21,6 +21,7 @@ test('search returns event hits with provenance', () => {
   assert.equal(hits.length, 1)
   assert.equal(hits[0].sessionId, 's1')
   assert.equal(hits[0].entryId, 'A')
+  assert.equal(hits[0].matchingFragmentId, 'A::user.text::0')
   assert.equal(hits[0].semanticKind, 'user.text')
   assert.equal(hits[0].matchingFragmentCount, 1)
   provider.close()
@@ -144,6 +145,19 @@ test('current session explicit search excludes invocation entry and later entrie
   provider.close()
 })
 
+test('current-session cutoff removes future relationship edges from traces', () => {
+  const provider = providerWith(TOOL_SESSION)
+  const execution = { currentSessionId: 's2', invocationEntryId: 'C' }
+  const trace = provider.traceEvent('s2', 'B', '/tmp/ws', execution)
+  assert.deepEqual(trace.children, [])
+  assert.deepEqual(trace.related, [])
+  assert.throws(
+    () => provider.traceEvent('s2', 'C', '/tmp/ws', execution),
+    (err: unknown) => err instanceof PiEventSearchError && err.code === 'NOT_FOUND',
+  )
+  provider.close()
+})
+
 test('readEvent returns truncation receipts for oversized text', () => {
   const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
 {"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"${'x'.repeat(5000)}"}
@@ -168,6 +182,70 @@ test('readEvent offset moves a fixed-size contiguous window', () => {
   assert.equal(preview.text, 'abcdefghij'.repeat(20).slice(0, 20))
   assert.deepEqual(preview.shownRanges, [{ start: 100, end: 120 }])
   assert.equal(preview.truncated, true)
+  provider.close()
+})
+
+test('search indexes both ends of oversized fragments', () => {
+  const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"tool_result","toolCallId":"tc1","name":"bash","result":"unique_head_token ${'x'.repeat(11_000)} unique_tail_token","isError":true}
+`
+  const provider = providerWith(text)
+  for (const query of ['unique_head_token', 'unique_tail_token']) {
+    const hits = provider.searchEvents({ query }, { authRoot: '/tmp/ws' })
+    assert.equal(hits.length, 1)
+    assert.equal(hits[0].entryId, 'A')
+    assert.equal(hits[0].semanticKind, 'tool.result')
+  }
+  provider.close()
+})
+
+test('search suppresses its own retrieval traffic unless toolNames explicitly opts in', () => {
+  const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"type":"message","id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"tc1","name":"event_search","arguments":{"query":"recursive_marker"}}],"timestamp":1}}
+{"type":"message","id":"B","parentId":"A","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"toolResult","toolCallId":"tc1","toolName":"event_search","content":[{"type":"text","text":"recursive_marker result"}],"isError":false,"timestamp":2}}
+`
+  const provider = providerWith(text)
+  assert.deepEqual(provider.searchEvents({ query: 'recursive_marker' }, { authRoot: '/tmp/ws' }), [])
+  const auditHits = provider.searchEvents(
+    { query: 'recursive_marker', toolNames: ['event_search'] },
+    { authRoot: '/tmp/ws' },
+  )
+  assert.deepEqual(auditHits.map((hit) => hit.entryId).sort(), ['A', 'B'])
+  provider.close()
+})
+
+test('readEvent can target the strongest matching fragment', () => {
+  const provider = providerWith(TOOL_SESSION)
+  const hit = provider.searchEvents({ query: 'npm install' }, { authRoot: '/tmp/ws' })
+    .find((candidate) => candidate.entryId === 'B')
+  assert.ok(hit)
+  const read = provider.readEvent('s2', 'B', {
+    fragmentId: hit.matchingFragmentId,
+    offset: 0,
+    windowChars: 40,
+  }, '/tmp/ws')
+  assert.equal(read.fragments.length, 1)
+  assert.equal(read.fragments[0].fragmentId, hit.matchingFragmentId)
+  assert.equal(read.fragments[0].semanticKind, 'tool.call')
+  assert.deepEqual(read.fragmentCoverage, { total: 2, returned: 1, omitted: 1, truncated: false })
+  provider.close()
+})
+
+test('readEvent bounds fragment count and reports coverage', () => {
+  const toolCalls = Array.from({ length: 8 }, (_, index) => ({
+    toolCallId: `tc${index}`,
+    name: 'bash',
+    arguments: { command: `echo ${index}` },
+  }))
+  const text = `{"sessionId":"s1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"assistant","toolCalls":${JSON.stringify(toolCalls)}}
+`
+  const parsed = parseSessionText(text)
+  const provider = new SearchProvider({ readMaxFragments: 3 })
+  provider.indexSession(parsed, makeSourceInfo(parsed))
+  const read = provider.readEvent('s1', 'A', {}, '/tmp/ws')
+  assert.equal(read.fragments.length, 3)
+  assert.deepEqual(read.fragmentCoverage, { total: 8, returned: 3, omitted: 5, truncated: true })
   provider.close()
 })
 
@@ -229,6 +307,30 @@ test('readEvent branch order reconstructs conversational context', () => {
   const read = provider.readEvent('s1', 'B', { order: 'branch', before: 2, after: 2 }, '/tmp/ws')
   assert.deepEqual(read.neighbors.before.map((neighbor) => neighbor.entryId), ['A'])
   assert.deepEqual(read.neighbors.after.map((neighbor) => neighbor.entryId), ['E', 'F'])
+  assert.deepEqual(read.neighbors.forks, [{
+    kind: 'in-session',
+    at: { sessionId: 's1', entryId: 'B' },
+    candidates: [
+      { sessionId: 's1', entryId: 'C' },
+      { sessionId: 's1', entryId: 'E' },
+    ],
+    chosen: { sessionId: 's1', entryId: 'E' },
+  }])
+  provider.close()
+})
+
+test('readEvent reports an ancestor fork leading to the target branch', () => {
+  const provider = providerWith(TREE_SESSION)
+  const read = provider.readEvent('s1', 'E', { order: 'branch', before: 2, after: 1 }, '/tmp/ws')
+  assert.deepEqual(read.neighbors.forks, [{
+    kind: 'in-session',
+    at: { sessionId: 's1', entryId: 'B' },
+    candidates: [
+      { sessionId: 's1', entryId: 'C' },
+      { sessionId: 's1', entryId: 'E' },
+    ],
+    chosen: { sessionId: 's1', entryId: 'E' },
+  }])
   provider.close()
 })
 
@@ -237,6 +339,7 @@ test('readEvent append order uses durable JSONL chronology', () => {
   const read = provider.readEvent('s1', 'E', { order: 'append', before: 2, after: 2 }, '/tmp/ws')
   assert.deepEqual(read.neighbors.before.map((neighbor) => neighbor.entryId), ['C', 'D'])
   assert.deepEqual(read.neighbors.after.map((neighbor) => neighbor.entryId), ['F'])
+  assert.deepEqual(read.neighbors.forks, [])
   provider.close()
 })
 

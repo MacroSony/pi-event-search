@@ -60,3 +60,82 @@ test('traceSession returns authorized lineage without transcripts', () => {
   assert.deepEqual(p.traceSession('p1', '/tmp/ws').childSessionIds, ['c1'])
   p.close()
 })
+
+test('Pi-style copied sessions expose cross-session fork receipts and trace edges', () => {
+  const parentPath = '/tmp/pi-sessions/parent.jsonl'
+  const parent = `{"sessionId":"p1","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/ws"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"shared root"}
+{"id":"B","parentId":"A","timestamp":"2026-01-01T00:00:02.000Z","type":"assistant","text":"shared fork anchor"}
+{"id":"P","parentId":"B","timestamp":"2026-01-01T00:00:04.000Z","type":"user","text":"parent continuation"}
+`
+  const child = `{"sessionId":"c1","createdAt":"2026-01-01T00:00:03.000Z","cwd":"/tmp/ws","parentSession":"${parentPath}"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"shared root"}
+{"id":"B","parentId":"A","timestamp":"2026-01-01T00:00:02.000Z","type":"assistant","text":"shared fork anchor"}
+{"id":"C","parentId":"B","timestamp":"2026-01-01T00:00:03.000Z","type":"user","text":"child continuation"}
+{"id":"D","parentId":"C","timestamp":"2026-01-01T00:00:05.000Z","type":"assistant","text":"child reply"}
+`
+  const parsedParent = parseSessionText(parent)
+  const parsedChild = parseSessionText(child)
+  const p = new SearchProvider()
+  p.indexSession(parsedParent, makeSourceInfo(parsedParent, parentPath))
+  p.indexSession(parsedChild, makeSourceInfo(parsedChild, '/tmp/pi-sessions/child.jsonl'))
+
+  const childRead = p.readEvent('c1', 'C', { order: 'branch', before: 1, after: 1 }, '/tmp/ws')
+  assert.deepEqual(childRead.neighbors.forks, [{
+    kind: 'session-fork',
+    at: { sessionId: 'p1', entryId: 'B' },
+    candidates: [
+      { sessionId: 'p1', entryId: 'P' },
+      { sessionId: 'c1', entryId: 'C' },
+    ],
+    chosen: { sessionId: 'c1', entryId: 'C' },
+  }])
+
+  const parentRead = p.readEvent('p1', 'P', { order: 'branch', before: 1 }, '/tmp/ws')
+  assert.deepEqual(parentRead.neighbors.forks[0]?.chosen, { sessionId: 'p1', entryId: 'P' })
+
+  const crossEdge = p.traceEvent('c1', 'C', '/tmp/ws').related.find((edge) => edge.type === 'session-fork')
+  assert.ok(crossEdge)
+  assert.deepEqual(crossEdge.to, { sessionId: 'p1', entryId: 'P' })
+  assert.equal(crossEdge.recorded, false)
+  assert.equal(crossEdge.derived, true)
+
+  assert.equal(p.traceSession('c1', '/tmp/ws').parentSessionId, 'p1')
+  assert.deepEqual(p.traceSession('p1', '/tmp/ws').childSessionIds, ['c1'])
+  p.close()
+})
+
+test('cross-session fork evidence is omitted when the parent is unavailable', () => {
+  const child = `{"sessionId":"c1","createdAt":"2026-01-01T00:00:03.000Z","cwd":"/tmp/ws","parentSession":"/tmp/pi-sessions/missing.jsonl"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"shared root"}
+{"id":"C","parentId":"A","timestamp":"2026-01-01T00:00:03.000Z","type":"user","text":"child continuation"}
+`
+  const parsed = parseSessionText(child)
+  const p = new SearchProvider()
+  p.indexSession(parsed, makeSourceInfo(parsed, '/tmp/pi-sessions/child.jsonl'))
+  assert.deepEqual(p.readEvent('c1', 'C', { order: 'branch' }, '/tmp/ws').neighbors.forks, [])
+  assert.deepEqual(p.traceEvent('c1', 'C', '/tmp/ws').related, [])
+  assert.equal(p.traceSession('c1', '/tmp/ws').parentSessionId, undefined)
+  p.close()
+})
+
+test('cross-session fork evidence never crosses the workspace authorization boundary', () => {
+  const parentPath = '/tmp/pi-sessions/private-parent.jsonl'
+  const parent = `{"sessionId":"private","createdAt":"2026-01-01T00:00:00.000Z","cwd":"/tmp/private"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"private root"}
+{"id":"P","parentId":"A","timestamp":"2026-01-01T00:00:04.000Z","type":"user","text":"private continuation"}
+`
+  const child = `{"sessionId":"public","createdAt":"2026-01-01T00:00:03.000Z","cwd":"/tmp/ws","parentSession":"${parentPath}"}
+{"id":"A","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","type":"user","text":"copied root"}
+{"id":"C","parentId":"A","timestamp":"2026-01-01T00:00:03.000Z","type":"user","text":"public continuation"}
+`
+  const parsedParent = parseSessionText(parent)
+  const parsedChild = parseSessionText(child)
+  const p = new SearchProvider()
+  p.indexSession(parsedParent, makeSourceInfo(parsedParent, parentPath))
+  p.indexSession(parsedChild, makeSourceInfo(parsedChild, '/tmp/pi-sessions/public.jsonl'))
+  assert.deepEqual(p.readEvent('public', 'C', { order: 'branch' }, '/tmp/ws').neighbors.forks, [])
+  assert.deepEqual(p.traceEvent('public', 'C', '/tmp/ws').related, [])
+  assert.equal(p.traceSession('public', '/tmp/ws').parentSessionId, undefined)
+  p.close()
+})
