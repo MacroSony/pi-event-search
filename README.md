@@ -8,6 +8,25 @@ The MVP public tools are `event_search`, `event_read`, and `event_trace`.
 The core search/read/trace engine is implemented and tested; the extension
 entrypoint in `extension.ts` registers those tools with the Pi coding agent.
 
+## Install
+
+`pi-event-search` requires Pi running on Node.js 24 or newer. Install the pinned
+package release globally for Pi:
+
+```bash
+pi install npm:pi-event-search@0.0.1
+```
+
+Start Pi normally in a trusted project. The package registers `event_search`,
+`event_read`, and `event_trace`; no `-e` flag is needed after installation.
+
+For development from a checkout:
+
+```bash
+npm install
+pi -e ./extension.ts
+```
+
 ## Why this exists
 
 Most session-search tools answer “which old session mentions this?” They commonly flatten a complete session into one search document or expose event-shaped data internally while returning only a session summary.
@@ -53,7 +72,7 @@ A search result should retain what produced it: the session, entry, fragment kin
 - `src/auth/*` — session discovery and workspace-root authorization.
 - `src/api/service.ts`, `src/tools.ts` — bounded public tool layer.
 - `src/pi-adapter.ts` — indexes the current session from Pi's SessionManager.
-- `extension.ts` — Pi extension entrypoint (`pi -e ./extension.ts`). Full scoped discovery runs only at startup/workspace change; turns and tools sync only the current session file.
+- `extension.ts` — Pi package entrypoint. Full scoped discovery runs only at startup/workspace change; turns and tools sync only the current session file.
 
 Run the test suite and typecheck:
 
@@ -91,3 +110,7 @@ authorization scope, with explicit root overrides for unusual layouts.
 Embeddings, automatic recall injection, memory consolidation, session grouping,
 reasoning retrieval, and custom-event extractor registries can be considered
 after the event model and authorization boundary are proven.
+
+## License
+
+MIT
